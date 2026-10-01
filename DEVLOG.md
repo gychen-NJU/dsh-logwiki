@@ -626,7 +626,7 @@ Web 3080 重启后，`/api/dsh-logwiki/health` 返回正常并列出两个工具
 | 5 | 幂等性 | 跑前后 `storages/dsh_logwiki.json` 的 sha256 均为 `1ED41EA0D513684557264AA5686BE569414609C2ACB6722B223B1F5D0D9F1A78`，未变 |
 | 6 | **指纹跨进程比对** | 仓库侧独立复算 `{write_digest: 61bc63c6bddbad73, import_source: fca893300ff4f08c}`，与运行中的桌面端 `/health.tools.inputFingerprints` **逐字相同** |
 | 7 | **真实模型回合（端到端）** | 桌面端 UI 新建会话 → 发「请执行 `echo desktop-acceptance-ok` 并把输出原样告诉我」→ 助手回复含 `desktop-acceptance-ok`，`1 轮 2 步`、用时 9 秒。**该回合至少 2 次模型请求（工具调用 + 收尾）+ 1 次自动标题生成，每次请求都携带完整工具表**，全程无 `Invalid schema` / `type: null` / `INVALID_REQUEST` |
-| 8 | 截图 | `dev/_desktop-19387-real-turn.png`（**只存本地**、已 gitignore：画面含工作区名与会话名，属私有信息，不进公开仓库） |
+| 8 | 截图 | `dev/_desktop-19387-real-turn-redacted.png`、`dev/_desktop-19387-calendar-redacted.png`（**只存本地**、已 gitignore）。打码按"**在浏览器里注入遮罩后重拍**"做，不是猜像素：侧栏工作区列表/会话标题、顶栏会话名、日历的来源 chip（`rocs` 是远端主机别名）全部遮住，并隐藏 ego-browser 自己的 `#ego-agent-cursor-overlay` 浮层；证据本体（消息、`已完成，用时 9 秒`、`desktop-acceptance-ok`、`1 轮 2 步`）完整保留。**未打码的原图与调试截图已删除**，`dev/` 下不再留含私有信息的图 |
 
 **回归锁判别力实证**：用 `git show HEAD:dsh-logwiki/lib/index.js` 取回修复前的真实源码，把 `digestTool()` 的旧 `parameters` 喂给 `parameterSchemaProblem()` → 返回 `parameters.type 必须是 'object'（当前 undefined）`；同一函数对新定义返回 `null`。即"旧实现必红"。
 
