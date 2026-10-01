@@ -1,48 +1,52 @@
 # dsh-LogWiki
 
-> **DSH 的任务日历 + Wiki**：把你在 DSH 里的工作按天沉淀成"一句话任务卡"，用热力图看工作量，按周/月生成大方向简报。
+**English** | [中文](./README.zh-CN.md)
+
+> A **task calendar + Wiki for DSH (DeepSeek Harness)**. It distils what you did in DSH into one-line task cards per day, visualises workload as a heatmap, and generates big-picture weekly / monthly briefs.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 ![DSH](https://img.shields.io/badge/DSH-%E2%89%A50.2.0--rc.2-blue)
-![零构建](https://img.shields.io/badge/build-none%20(hand--written%20ESM)-green)
+![build](https://img.shields.io/badge/build-none%20(hand--written%20ESM)-green)
 
-![年视图热力图](docs/screenshots/l1-real-01-heatmap.png)
+![Year heatmap](docs/screenshots/l1-real-01-heatmap.png)
 
-![日详情三层卡片](docs/screenshots/l1-real-02-day.png)
+![Day detail: three-layer cards](docs/screenshots/l1-real-02-day.png)
+
+> The plugin UI is in Chinese (a deliberate choice for its primary user). Screenshots show the real UI.
 
 ---
 
-## 它解决什么问题
+## The problem it solves
 
-你在 DSH 里干了一天的活，但**日志是按会话存的**——想知道"上周三我到底推进了哪几件事"，得翻几十个会话文件。dsh-LogWiki 把这件事变成：**打开日历 → 点那一天 → 看几张卡片**。
+You spend a day working in DSH, but **the logs are stored per session** — to answer "what did I actually push forward last Wednesday?" you would have to dig through dozens of session files. dsh-LogWiki turns that into: **open the calendar → click the day → read a few cards**.
 
-- **不新增任何记录负担**：数据全部来自你已经产生的 DSH 会话日志，你不需要写日报。
-- **一句话而不是转录**：每条任务由 LLM 归纳成一句人话 + 一个关键词标签，你可以手改，改过的**永不被自动重算覆盖**。
-- **周/月简报按"大方向"而非流水账**：明确要求模型产出 **8–12 条**，实测周 11/10 条、月 9/8 条。
+- **Zero extra bookkeeping.** Everything comes from the DSH session logs you already produce. You never write a daily report.
+- **One sentence, not a transcript.** An LLM condenses each task into one plain sentence plus a keyword tag. You can edit it, and edited entries are **never overwritten** by later recomputation.
+- **Weekly / monthly briefs stay big-picture.** The prompt explicitly asks for **8–12 items**; measured output was 11/10 (weekly) and 9/8 (monthly).
 
-## 功能
+## Features
 
-| 能力 | 实现 |
+| Capability | Implementation |
 |---|---|
-| 日历 + 工作量热力图 | GitHub 风格 53×7 网格；指标可切 回合 / Token / 会话数 / 条目数；阈值按可见窗口的分位数（p25/p50/p75/p90）分档 |
-| 点进某天看做了什么 | 抽屉式详情，**来源 → 工作区 → 任务条目** 三层卡片 |
-| 一句话任务卡 | 时间 + 一句话总结 + 关键词标签 + 来源会话数；按时间升序；卡片风格 |
-| 标签可编辑 | 条目可编辑/删除/新增；手改后打 `已手改` 徽章且**永不被重算覆盖**，同时被排除出 LLM 输入 |
-| 手动更新 | 「更新」按钮 + SSE 实时进度；增量、分批、从新到旧，可断点续跑 |
-| 周/月简报 | 插件内直调 LLM 归纳并**落库留存**；「重新生成」才覆盖；另有「交给智能体」按钮把提示词写进输入框 |
-| 周期导航 | 简报**跟随你正在看的那一天**（点 9/25 就出 9/25 那一周），并可用 `‹ ›` 在**有活动的周期之间**前后跳 |
+| Calendar + workload heatmap | GitHub-style 53×7 grid; metric switchable between turns / tokens / sessions / entries; thresholds are quantiles (p25/p50/p75/p90) over the visible window |
+| Click a day to see what happened | Drawer detail with three layers: **source → workspace → task entry** |
+| One-line task cards | time + one-sentence summary + keyword tag + number of source sessions; sorted by time; card style |
+| Editable tags | entries can be edited / deleted / added; edited ones get an `edited` badge and are **never overwritten**, and are excluded from LLM input |
+| Manual refresh | a `更新` (Refresh) button with live SSE progress; incremental, batched, newest-first, resumable |
+| Weekly / monthly briefs | summarised in-plugin via `ctx.llm` and **persisted**; only "regenerate" overwrites; a "hand to the agent" button writes the prompt into the composer |
+| Period navigation | the brief **follows the day you are looking at** (click Sep 25 → you get that week), and `‹ ›` steps between periods **that actually have activity** |
 
-**来源隔离**：内部键是 `<来源>::<会话>`，条目 id 也含来源，日详情第一层就是来源分区 —— 所以「本机 + 远程服务器」各自成分区是数据结构原生支持的，二期把采集通道接通了（见文末 Roadmap）。
+**Source isolation** is structural: internal keys are `<source>::<session>`, entry ids include the source, and the first layer of the day detail is a source partition — so "local + remote server" showing up as separate partitions needed no schema change; phase 2 just wired up the collection path (see Roadmap).
 
-## 安装
+## Install
 
-**零构建**：克隆后直接指向 `lib/index.js` 即可，不需要 `npm install`、不需要打包。
+**Zero build.** Clone and point at `lib/index.js` — no `npm install`, no bundling.
 
 ```powershell
 git clone https://github.com/gychen-NJU/dsh-logwiki.git
 ```
 
-然后在 `$DSH_HOME/profiles/web/cordis.patch.yml` 末尾追加（把 `<repo>` 换成本机克隆路径）：
+Then append the following to `$DSH_HOME/profiles/web/cordis.patch.yml` (replace `<repo>` with your clone path):
 
 ```yaml
 - insert:
@@ -72,124 +76,126 @@ git clone https://github.com/gychen-NJU/dsh-logwiki.git
           maxBytesPerSync: 33554432
 ```
 
-重启该实例后，左栏出现「**任务日历**」。卸载 = 删掉这段再重启。
+Restart that instance and a **任务日历** (Task Calendar) icon appears in the left sidebar. To uninstall, delete this block and restart.
 
-**要点**
-- 插件用**绝对 `file:///` 路径**加载，因此不依赖 profile 的 `node_modules`。
-- 客户端半边由**最近的祖先 `package.json`** 里的 `dsh.client` + `exports["./client"]` 发现 —— 所以别只拷 `lib/`，要连 `dsh-logwiki/package.json` 一起。
-- **改 host 半边必须重启实例**；客户端半边改动由 client-hmr 热替换。
-- `config` 是**整体替换、不深合并**，改任何一项都要把整块写全。
+**Notes**
 
-## 使用
+- The plugin is loaded via an **absolute `file:///` path**, so it does not depend on the profile's `node_modules`.
+- The client half is discovered through the **nearest ancestor `package.json`** (`dsh.client` + `exports["./client"]`) — so copy the whole `dsh-logwiki/`, not just `lib/`.
+- **Changes to the host half require an instance restart**; client-half changes are hot-swapped by client-hmr.
+- `config` is **replaced wholesale, not deep-merged** — always write the whole block when changing one value.
 
-1. 左栏点「**任务日历**」。
-2. 年视图看热力图，点任意有色格进某天详情。
-3. 改某条摘要/标签 → 保存（标记为手改，后续重算不覆盖）。
-4. 点「**更新**」增量回填新会话。**首次回填很重**，按 `scan.maxNewPerRun` 分批、从新到旧。
-   - ⚠️ 读超大日志（5 MB 级、多帧 zstd 解压 + 重放校验）会占住 Node 事件循环数十秒，**期间页面会发顿**——这是预期行为，不是崩溃。
-5. 「**周总结**」/「**月总结**」：跟随选中日期；有缓存直接显示，没有就点「生成」。「交给智能体」会把提示词写进输入框（不支持时给可复制文本框）。
+## Usage
 
-![周总结](docs/screenshots/l2-3080-digest.png)
+1. Click **任务日历** in the left sidebar.
+2. Use the year view for the heatmap; click any coloured cell to open that day.
+3. Edit an entry's summary / tag and save — it is marked as hand-edited and later recomputation will not overwrite it.
+4. Click **更新** (Refresh) to backfill new sessions incrementally. **The first backfill is heavy**: batched by `scan.maxNewPerRun`, newest first.
+   - ⚠️ Reading a very large log (5 MB class, multi-frame zstd + replay validation) blocks the Node event loop for tens of seconds; **the page will feel sluggish during that window** — expected behaviour, not a crash.
+5. **周总结 / 月总结** (weekly / monthly brief): follows the selected date; shows the cached brief if present, otherwise click "generate". "Hand to the agent" writes the prompt into the composer (with a copyable textarea as fallback).
 
-## 配置
+![Weekly brief](docs/screenshots/l2-3080-digest.png)
 
-| 键 | 默认 | 说明 |
+## Configuration
+
+| Key | Default | Description |
 |---|---|---|
-| `scan.sinceDays` | 365 | 回填窗口（天） |
-| `scan.maxSessions` | 2000 | 候选会话上限 |
-| `scan.maxNewPerRun` | 300 | 每次「更新」最多处理多少个**新增**会话（已入库的会廉价跳过） |
-| `summarize.provider` / `model` | `deepseek-official` / `deepseek-flash` | 摘要与简报所用模型 |
-| `summarize.maxTokens` | 8192 | ⚠️ 别调太小：设成 2048 会把简报输出截断，生成直接失败 |
-| `summarize.timeoutMs` | 60000 | 单次 LLM 调用超时 |
-| `summarize.maxConcurrency` | 2 | 并发上限 |
-| `summarize.onlyTopLevelSessions` | true | 只为顶层会话生成条目（子代理并入其父） |
-| `heatmap.metric` | `turns` | 默认指标 |
-| `heatmap.includeSubagents` | true | 子代理工作量是否计入热力图 |
-| `ui.language` / `weekStart` | `zh` / `1` | 语言 / 周一起始 |
-| `remote.enable` | false | 远程来源总开关：开了之后「更新」会顺带同步所有已启用的远程来源（单独点「同步」不受它限制） |
-| `remote.maxFilesPerSync` | 400 | 单次同步最多拉多少个文件 |
-| `remote.maxBytesPerFile` | 67108864 | 单文件上限（按 base64 **编码后**的体积算，别按原始大小设小） |
-| `remote.maxBytesPerSync` | 33554432 | 单次同步总字节预算 |
-| `remote.commandTimeoutMs` | 120000 | 单条远端命令超时 |
-| `remote.maxSourcesPerRun` | 3 | 一次「更新」最多同步几个来源 |
+| `scan.sinceDays` | 365 | backfill window (days) |
+| `scan.maxSessions` | 2000 | candidate session cap |
+| `scan.maxNewPerRun` | 300 | how many **new** sessions one refresh processes (already-ingested ones are skipped cheaply) |
+| `summarize.provider` / `model` | `deepseek-official` / `deepseek-flash` | model used for entries and briefs |
+| `summarize.maxTokens` | 8192 | ⚠️ do not shrink this: at 2048 the brief output gets truncated and generation fails outright |
+| `summarize.timeoutMs` | 60000 | per-call LLM timeout |
+| `summarize.maxConcurrency` | 2 | concurrency cap |
+| `summarize.onlyTopLevelSessions` | true | only top-level sessions produce entries (subagents are merged into their parent) |
+| `heatmap.metric` | `turns` | default metric |
+| `heatmap.includeSubagents` | true | whether subagent work counts towards the heatmap |
+| `ui.language` / `weekStart` | `zh` / `1` | language / first day of week |
+| `remote.enable` | false | master switch: when on, **Refresh** also syncs every enabled remote source (clicking "sync" on a single source is not gated by it) |
+| `remote.maxFilesPerSync` | 400 | max files pulled per sync |
+| `remote.maxBytesPerFile` | 67108864 | per-file cap (**measured after base64 encoding** — do not size it against the raw file) |
+| `remote.maxBytesPerSync` | 33554432 | total byte budget per sync |
+| `remote.commandTimeoutMs` | 120000 | timeout for a single remote command |
+| `remote.maxSourcesPerRun` | 3 | how many sources one Refresh syncs |
 
-## 数据存放
+## Where data lives
 
-- 结构化数据经 `ctx.storage` 落到 **`$DSH_HOME/storages/dsh_logwiki.json`**：条目、简报、来源、同步账本、会话指纹。
-- **不要手改**这个文件——它是插件唯一的持久化载体。
-- ⚠️ 该文件**被同 `$DSH_HOME` 的所有实例共享**。**同一时刻只应有一个实例启用本插件**，否则并发写。
+- Structured data goes through `ctx.storage` into **`$DSH_HOME/storages/dsh_logwiki.json`**: entries, briefs, sources, sync ledger, session fingerprints.
+- **Do not hand-edit** that file — it is the plugin's only persistent store.
+- ⚠️ The file is **shared by every instance with the same `$DSH_HOME`**. **Only one instance should have this plugin enabled at a time**, otherwise you get concurrent writes.
 
-## 验证
+## Verification
 
 ```powershell
 cd <repo>/dsh-logwiki
 
-# 对**生产实例**：安全、只读、幂等
-# （跑前后 storages/dsh_logwiki.json 的 sha256 不变，已实证）
+# Against a PRODUCTION instance: safe, read-only, idempotent
+# (the sha256 of storages/dsh_logwiki.json is unchanged across a run — verified)
 node scripts/accept-l1.mjs http://127.0.0.1:3080
 
-# 完整模式：会写数据（改条目、重生成简报、触发回填）——仅限专用测试实例
+# Full mode: writes data (edits an entry, regenerates a brief, triggers a backfill)
+# — only against a dedicated test instance
 node scripts/accept-l1.mjs http://127.0.0.1:3081 --mutate --refresh
 
-# 纯离线自检（不需要运行中的实例）
-node scripts/verify-extract.mjs       # 真实日志全量重放 + 159 断言
-node scripts/verify-prompts.mjs       # 提示词 / JSON 容错 / 契约行为 103 断言
-node scripts/verify-remote.mjs        # 远程来源纯逻辑层 60 断言
-node scripts/verify-zstd-frames.mjs   # 多重 zstd frame 解码 8 断言
+# Offline self-checks (no running instance needed)
+node scripts/verify-extract.mjs       # full replay of real logs + 159 assertions
+node scripts/verify-prompts.mjs       # prompts / JSON tolerance / contract behaviour, 103 assertions
+node scripts/verify-remote.mjs        # remote-source pure logic, 60 assertions
+node scripts/verify-zstd-frames.mjs   # multi-frame zstd decoding, 8 assertions
 ```
 
-当前结果：**只读 44/44（exit=0）**；离线四套件 159/0 · 103/0 · 60/60 · 8/8。
+Current result: **read-only 44/44 (exit 0)**; offline suites 159/0 · 103/0 · 60/60 · 8/8.
 
-> `accept-l1.mjs` 只打 HTTP 端点，**测不到"按钮点了有没有反应"**。点击类交互另见 [`docs/MANUAL-CHECKLIST.md`](docs/MANUAL-CHECKLIST.md) 的 C2 节清单。
+> `accept-l1.mjs` only hits HTTP endpoints and therefore **cannot tell whether a button actually does anything**. Click-driven interactions have their own list in section C2 of [`docs/MANUAL-CHECKLIST.md`](docs/MANUAL-CHECKLIST.md).
 
-## 代码结构
+## Code layout
 
 ```
 dsh-logwiki/
 ├─ package.json          dsh.client{platform:"web"} + exports["./client"]
-├─ cordis.patch.yml      包内 patch（用 dsh plugin add 安装时用）
+├─ cordis.patch.yml      in-package patch (used when installing via dsh plugin add)
 ├─ lib/
-│  ├─ index.js           集成层：路由 / 刷新编排 / SSE / 条目 CRUD / 工具注册 / 动态 import 降级
-│  ├─ extract.js         纯函数：事件 → 会话指纹（按事件时间归日、token、工具直方图、顶层判定）
-│  ├─ fold.js            纯函数：子代理归并、天/工作区聚合、分位分档、State/Day payload
-│  ├─ store.js           唯一接触 ctx 的数据文件：storage KV 落盘（防抖 + 串行化 + 降级）
-│  ├─ summarize.js       LLM 层：条目摘要 + 简报（ctx.llm.stream，无 complete）
-│  ├─ prompts.js         中文提示词 + JSON 容错解析
-│  ├─ vendor-dsh.js      **唯一** import @deepseek-ai/* 的文件（createRequire 解析 DSH 安装路径）
-│  ├─ remote.js          纯函数：远程来源的命令构造 / 清单解析 / 同步规划 / 解码（不接触 ctx）
-│  ├─ remote-sources.js  纯函数：来源定义校验 + 「添加来源」提示词 + logwiki_import_source 工具
-│  ├─ vendor/            内联 fzstd（MIT，逐字节复制，见其 README）
-│  └─ client.js          客户端半边：手写 ESM + React.createElement
-└─ scripts/              验收与离线自检
+│  ├─ index.js           integration: routes / refresh orchestration / SSE / entry CRUD / tool registration / dynamic-import degradation
+│  ├─ extract.js         pure: events → session fingerprint (per-day by event time, tokens, tool histogram, top-level detection)
+│  ├─ fold.js            pure: subagent rollup, day & workspace aggregation, quantile buckets, State/Day payloads
+│  ├─ store.js           the only data file touching ctx: storage KV persistence (debounce + serialisation + degradation)
+│  ├─ summarize.js       LLM layer: entry summaries + briefs (ctx.llm.stream; there is no complete())
+│  ├─ prompts.js         Chinese prompts + tolerant JSON parsing
+│  ├─ vendor-dsh.js      the **only** file importing @deepseek-ai/* (createRequire resolves the DSH install)
+│  ├─ remote.js          pure: remote command building / index parsing / sync planning / decoding (never touches ctx)
+│  ├─ remote-sources.js  pure: source validation + the "add source" prompt + the logwiki_import_source tool
+│  ├─ vendor/            inlined fzstd (MIT, copied byte-for-byte — see its README)
+│  └─ client.js          client half: hand-written ESM + React.createElement
+└─ scripts/              acceptance and offline self-checks
 ```
 
-配套文档：[`docs/OVERVIEW.md`](docs/OVERVIEW.md)（**冻结接口契约**，改接口先改它）、[`docs/MANUAL-CHECKLIST.md`](docs/MANUAL-CHECKLIST.md)（验收清单、实测结果、已知问题）、[`DEVLOG.md`](DEVLOG.md)（逐里程碑证据与踩坑记录）。
+Companion docs: [`docs/OVERVIEW.md`](docs/OVERVIEW.md) (**frozen interface contract** — change it before changing interfaces), [`docs/MANUAL-CHECKLIST.md`](docs/MANUAL-CHECKLIST.md) (acceptance list, measured results, known issues), [`DEVLOG.md`](DEVLOG.md) (per-milestone evidence and post-mortems).
 
-## 关键技术约束（改代码前必读）
+## Hard constraints (read before changing code)
 
-1. **客户端半边**必须是 `window.__ModuleLoader__.load({ id, factory })`，`id` 逐字等于包名，否则整页白屏；**只能 `require('react')`**（平台只 seed 9 个模块），其它服务走 `inject` + `ctx.get()`；样式只用 `--dsw-*` token。
-2. **Cordis**：`inject` 保持最小（本插件只硬依赖 `webServer`）。`ctx.timeout()` 需要 `timer` 注入、`ctx.logger` 同样需注入（否则**静默**）。让出事件循环用普通 `setTimeout`，日志用 `console`。
-3. **会话数据只走 `ctx.sessionQuery`**，绝不手工解析日志（多重 zstd 帧 + 多代格式）。
-4. **绝不向会话日志追加事件**（v4 只接受 producer-owned source kind）。插件数据一律进 `storage`。
-5. **LLM**：`ctx.llm.stream` 是唯一动词，**省略 `purpose` 与 `sessionId`**；手搓调用只有一次 attempt，失败以 finish chunk 返回，必须自己判。
-6. **归并规则**：只归并非顶层记录，**顶层永不参与归并**；归并不得改写 `delegationDepth`。（否则会静默丢数据——曾实测丢 51 回合 / 611 steps。）
-7. **多帧 zstd**：DSH 的 `session.v4.jsonl.zstd` 是**多个独立 frame 拼接**，而 **Node 自带的 `zlib.zstdDecompressSync` 只解第一帧**（实测同一份 5.18 MB 日志：内置解出 1 行 / 198 字节，fzstd 解出 4333 行 / 15.5 MB）。DSH 自己的多帧解码器在 `@deepseek-ai/dsh-session-persistence-jsonl`，但该包 `exports` 只暴露 `.`，`./zstd` 不可 import —— 所以内联了 `fzstd`。**本地会话仍一律走 `ctx.sessionQuery`**，手工解码只用于远程来源。
+1. **The client half** must be `window.__ModuleLoader__.load({ id, factory })` with `id` exactly equal to the package name, or the page goes blank; it may **only `require('react')`** (the platform seeds 9 modules), everything else goes through `inject` + `ctx.get()`; styles must use `--dsw-*` tokens only.
+2. **Cordis**: keep `inject` minimal (this plugin only hard-depends on `webServer`). `ctx.timeout()` needs `timer` injected and `ctx.logger` needs injecting too (otherwise it is **silent**). Yield the event loop with a plain `setTimeout`; log with `console`.
+3. **Session data goes through `ctx.sessionQuery` only** — never parse log files by hand (multi-frame zstd + several format generations).
+4. **Never append events to session logs** (v4 only accepts producer-owned source kinds). Plugin data always goes into `storage`.
+5. **LLM**: `ctx.llm.stream` is the only verb; **omit `purpose` and `sessionId`**; a hand-rolled call gets a single attempt and reports failure as a finish chunk, so you must inspect it yourself.
+6. **Rollup rule**: only non-top-level records are merged, **top-level records never participate**; merging must not rewrite `delegationDepth`. (Otherwise data disappears silently — 51 turns / 611 steps were lost this way once.)
+7. **Multi-frame zstd**: DSH's `session.v4.jsonl.zstd` is **several independent frames concatenated**, and **Node's built-in `zlib.zstdDecompressSync` decodes only the first frame** (same 5.18 MB log: built-in → 1 line / 198 bytes; fzstd → 4333 lines / 15.5 MB). DSH's own multi-frame decoder lives in `@deepseek-ai/dsh-session-persistence-jsonl`, but that package's `exports` only exposes `.`, so `./zstd` is not importable — hence the inlined `fzstd`. **Local sessions still always go through `ctx.sessionQuery`**; manual decoding is only for remote sources.
 
 ## Roadmap
 
-- [x] **一期**（已发布并已通过验收）：本机会话 → 日历 / 热力图 / 三层卡片 / 条目编辑 / 周月简报 / 周期导航
-- [x] **二期**（已完成并已实测跑通真实远端）：远程来源
-  - **添加来源**：工具栏「+ 添加来源」对话框收 SSH 别名 / WSL 发行版 / 远端 `DSH_HOME`；两条登记路径 —— 信息齐了直接登记，或点「交给智能体」生成提示词走 **f2a-ssh**（WSL OpenSSH + ControlMaster，2FA 只发生一次）→ 由智能体调 `logwiki_import_source` 落库；信息不全时**提示词会要求智能体用 `ask_user_question` 向你索取**
-  - **快速通道同步**：点「同步」→ `ctx.subprocess` 调 `wsl.exe → ssh`（复用主连接免 2FA）→ 远端 `find` 清单 → 比对账本**只拉新增/变化** → `base64 -w0` 回传 → 本地用内联 `fzstd` 解码 → 复用同一个 `extract.js`
-  - **来源隔离展示**：日详情第一层就是来源分区（`本机` / `远程 <名称>`），各自带独立的工作区卡片与路径
+- [x] **Phase 1** (released and accepted): local sessions → calendar / heatmap / three-layer cards / entry editing / weekly & monthly briefs / period navigation
+- [x] **Phase 2** (done, verified against a real remote host): remote sources
+  - **Adding a source**: the toolbar's **+ 添加来源** dialog takes an SSH alias / WSL distro / remote `DSH_HOME`. Two registration paths — register directly when the info is complete, or click "hand to the agent" to generate a prompt that goes through **f2a-ssh** (WSL OpenSSH + ControlMaster, so 2FA happens once) and ends with the agent calling `logwiki_import_source`; when information is missing, **the prompt instructs the agent to ask you via `ask_user_question`**
+  - **Fast-path sync**: click "sync" → `ctx.subprocess` runs `wsl.exe → ssh` (reusing the master connection, no 2FA) → remote `find` index → compare against the ledger and **pull only new/changed files** → `base64 -w0` back → decode locally with the inlined `fzstd` → reuse the very same `extract.js`
+  - **Source-partitioned display**: the first layer of the day detail is the source partition (`本机` / `远程 <name>`), each with its own workspace cards and paths
 
-### 已知行为（不是 bug）
+### Known behaviours (not bugs)
 
-- **有回合数、但那天没有任务卡**：在个别日子里，热力图有颜色、日详情却是空的。原因是那天的活动全部来自**父会话记在另一天的子代理**——按归并契约，子代理并入其顶层父会话、条目只由顶层会话生成，所以落在父会话那一天。属预期行为。
-- **首次回填很慢**：读超大会话日志会占住 Node 事件循环数十秒，期间页面会发顿；且 `scan.maxNewPerRun` 决定每轮处理多少个新增会话，历史是**分批**补齐的。
+- **A day can show turns but no task cards.** On some days the heatmap has colour yet the day detail is empty. The activity on those days comes entirely from **subagents whose parent session is recorded on a different day** — by the rollup contract subagents merge into their top-level parent and only top-level sessions produce entries, so the cards land on the parent's day. This is intended.
+- **The first backfill is slow.** Reading very large session logs blocks the Node event loop for tens of seconds and the page feels sluggish; and `scan.maxNewPerRun` decides how many new sessions each refresh handles, so history fills in **batches**.
 
 ## License
 
 [MIT](./LICENSE) © gychen-NJU
 
-内联的 `fzstd` 亦为 MIT，见 [`dsh-logwiki/lib/vendor/fzstd.LICENSE.txt`](dsh-logwiki/lib/vendor/fzstd.LICENSE.txt)。
+The inlined `fzstd` is MIT as well — see [`dsh-logwiki/lib/vendor/fzstd.LICENSE.txt`](dsh-logwiki/lib/vendor/fzstd.LICENSE.txt).
