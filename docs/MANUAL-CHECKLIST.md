@@ -40,21 +40,24 @@ node dsh-logwiki\scripts\accept-l1.mjs http://127.0.0.1:3081 --probe
 
 ```powershell
 cd dsh-logwiki
-node --check lib/index.js; node --check lib/client.js
-node --check lib/extract.js; node --check lib/fold.js; node --check lib/store.js
-node --check lib/summarize.js; node --check lib/prompts.js; node --check lib/vendor-dsh.js
-node --check lib/paths.js; node --check lib/store.js; node --check lib/client.js
+# lib/ 下**全部** .js 逐个过语法门。此前这行是手写枚举，出过两个问题：
+#   1) store.js 与 client.js 各被检查了两遍（重复）；
+#   2) remote.js 与 remote-sources.js 从未进过门（漏检）。
+# 改成遍历，新增模块自动纳入。
+Get-ChildItem lib\*.js | ForEach-Object { node --check $_.FullName; if ($LASTEXITCODE -ne 0) { throw "syntax: $($_.Name)" } }
 node scripts/verify-extract.mjs      # 线 A 的真数据提取自检
 node scripts/verify-prompts.mjs      # 线 B 的提示词/解析/契约自检
+node scripts/verify-remote.mjs       # 远程来源逻辑 / 工具 schema / 路径派生 / 按实例分库 / 隐私门
 ```
 
 | # | 项 | 预期 |
 |---|---|---|
-| B1 | 八个 lib 文件语法全绿 | 全部 exit=0 |
+| B1 | `lib/` 下全部 `.js`（当前 **11 个**：index / client / extract / fold / store / summarize / prompts / vendor-dsh / paths / remote / remote-sources）语法全绿 | 上一条命令 exit=0，无抛出 |
 | B2 | 挂载证据 | `dsh --profile web --patch dev\logwiki.patch.yml --dump-config` 出现 `# == ...\dev\logwiki.patch.yml` + `- id: logwiki` |
 | B3 | 共享 profile 未被改动 | 同一 dump 里 `# == dsh-overleaf, patched by ...\profiles\web\cordis.patch.yml` 仍在 |
 | B4 | 离线提取自检 | 无断言的失败 |
 | B5 | 提示词自检 | 103 项全绿 |
+| B6 | 远程来源自检 | `verify-remote.mjs` 全绿（含隐私门：`lib/` 与 `scripts/` 里不出现真实用户名路径） |
 
 ## C. 界面与交互（L1，需截图 + 你确认）
 
@@ -72,8 +75,288 @@ node scripts/verify-prompts.mjs      # 线 B 的提示词/解析/契约自检
 | C10 | **月总结**同样 ≤12 条（不是上百条） | 截图 |
 | C11 | **「交给智能体」**：提示词被写进输入框（或给出可复制文本框），发出去后智能体能调用 `logwiki_write_digest` 落库 | 截图 |
 | C12 | 深浅色主题切换正常；窄窗口与滚动正常 | 截图 |
+
+> ⚠️ **C12 的环境口径（必须按此写，不许写成"深浅色两套已验证"）**
+> 本机装有第三方插件 `dsh-dream-skin`，其「午夜黑」皮肤**强制深色**，DSH 内置「外观 → 浅色」完全失效。
+> 因此：
+> - **原生浅色主题在本环境无法验证**（点了不生效）。
+> - 浅色截图与浅色对比度是在**换皮肤（切到「干净明亮」）**的条件下测得的；测完已切回「午夜黑」恢复原状。
+> - 更糟的组合：皮肤把 `--dsw-alias-bg-base` 覆盖成 **10% 半透明**，在「深壁纸 + 浅色主题」下组件根面合成成 `#3b3b3e`，而文字是 `#0f1b33` → 近乎不可读。**判为已知环境限制、不阻塞**。
+> - 结论措辞应为：**深色已实测通过；浅色仅在换皮肤条件下实测通过；原生浅色受第三方皮肤阻断，未能验证。**
 | C13 | **任一区块报错不白屏**（错误边界兜底） | 破坏性验证或代码走查说明 |
 | C14 | 空态/加载态/错误态文案像样（如 `scan.done=false` 时显示"正在回填历史…"） | 截图 |
+
+## C+. 视觉与交互精修（Operate 模式「年度台账」）
+
+> **契约**：`docs/DESIGN.md`（本轮唯一设计依据）。
+> **范围**：只改 `dsh-logwiki/lib/client.js`；零接口变更、零 Host 改动。
+> **通用证据形式**：截图放 `docs/screenshots/`；命令与 DOM 输出贴进本节对应条目（或 `DEVLOG.md`）。
+
+### C15 · 颜色职责分离——绿色只剩「量」这一件事
+
+**验收动作**
+
+1. 年视图（浅色主题）截全图；再切深色主题截一张。
+2. 控制台逐项采样并打印 `getComputedStyle`：
+   ```js
+   const pick = (sel, prop='backgroundColor') => [sel, getComputedStyle(document.querySelector(sel))[prop]];
+   console.table([
+     pick('button[title^="增量扫描"]'),        // 「更新」主操作
+     pick('.lw-chip.lw-on'),                  // 选中的来源 chip
+     pick('.lw-tag'),                         // 条目标签 chip（先在抽屉里打开一天）
+   ]);
+   ```
+3. 统计写死颜色只出现一次：
+   ```powershell
+   node -e "const t=require('fs').readFileSync('dsh-logwiki/lib/client.js','utf8');const m=t.match(/#39d353/gi)||[];console.log('39d353 x'+m.length);if(m.length!==1)process.exit(1)"
+   ```
+
+**期望**
+
+- 「更新」/选中 chip 的底色解析为 `--dsw-alias-brand-primary`（浅色 `rgb(15, 17, 21)`，深色 `rgb(249, 250, 251)`），文字为 `--dsw-alias-label-primary-foreground`。
+- 标签 chip 底 `rgba(0, 0, 0, 0)`（透明），边框色解析为 `--dsw-alias-border-l3`。
+- 整页除**热力图色阶 / 月视图强度条 / 图例**外，无任何绿色系填充或文字。
+
+**证据形式**：`docs/screenshots/ui-year-heatmap-dark.png`（深色：绿只在热力图/图例、主操作与选中态为品牌色、chip 中性）、`ui-year-heatmap-light.png`（浅色同项）；上面两段命令的完整输出。
+
+### C16 · 年视图热力图数据自适应
+
+**验收动作**：窗口宽度依次调到 **1440 / 1280 / 1080 / 640**，每档等布局稳定后跑：
+
+```js
+const s = document.querySelector('.lw-scroll');
+const c = document.querySelector('.lw-cell');
+console.log({ w: innerWidth, scrollW: s.scrollWidth, clientW: s.clientWidth, cell: c.getBoundingClientRect().width, overflow: s.scrollWidth > s.clientWidth + 1 });
+```
+
+**期望**
+
+- 1440 / 1280 / 1080：`overflow === false`（**宽窗不出现横向滚动条**）。
+- 单元格边长 = `clamp((容器宽 − 星期栏 − 3×(53−1)) / 53, 8, 22)`，四档分别落在 `(8, 22]` 区间内且随视口单调不增。
+- 640：`cell === 8`（触底），`overflow === true`（出现横向滚动）。
+- 网格几何自洽：`格子右边最大坐标 + 边长 ≤ s.clientWidth`（未触底时）。
+
+**空格子可辨识性（实测采样记录，有意保留的例外，不是遗漏）**
+
+浅色主题下 `bg-base` / `bg-layer-1/2/3` **全都是 `#fff`**，所以"0 档空格子 + 1px 内描边"在浅色下对比度天然偏低。实测（按档位底色 vs 描边色取色计算）：
+
+| 主题 | 0 档底 / 内描边 | 对比度 |
+|---|---|---|
+| 浅色 | `bg-skeleton` vs `border-l1` | **1.09** |
+| 深色 | `bg-skeleton` vs `border-l1` | **1.27**（底/描边分别为 1.27 / 1.19） |
+| 浅色（若把内描边升到 `border-l2`） | — | 1.26 |
+| 深色（同上） | — | 1.46 |
+
+**裁定**：`ui-crafter` 曾建议把基础内描边从 `--dsw-alias-border-l1` 升到 `-l2`（可把空格子可辨识性提到 1.26 / 1.46）。
+**队长已亲自复核浅色截图，判定空格子在浅色下清晰可辨、网格结构读得出，故不改 token** —— `DESIGN.md §3.3` 仍钉 `border-l1`。
+本表作为**有意保留的例外**留档备查。
+
+**证据形式**：`docs/screenshots/ui-year-heatmap-dark.png`、`ui-year-heatmap-light.png`、`ui-narrow-640-dark-EXTRA.png`；四档 `console.log` 输出（贴成一张表）。
+
+### C17 · 年度台账栏是低对齐度度量表，不是大数字 hero
+
+**验收动作**
+
+1. 视口 ≥1080px，年视图截图。
+2. 控制台跑：
+   ```js
+   const L = document.querySelector('.lw-ledger');
+   const els = [...L.querySelectorAll('*')];
+   console.log({
+     width: L.offsetWidth,
+     maxFontSize: Math.max(...els.map(e => parseFloat(getComputedStyle(e).fontSize))),
+     maxFontWeight: Math.max(...els.map(e => parseInt(getComputedStyle(e).fontWeight, 10) || 0)),
+     gradients: els.filter(e => getComputedStyle(e).backgroundImage.includes('gradient')).length,
+     rows: L.querySelectorAll('.lw-ledger-row').length,
+   });
+   ```
+
+**期望**：`width === 216`；`maxFontSize <= 14`；`maxFontWeight <= 500`；`gradients === 0`；`rows >= 5`（轮次/会话/条目/Token/活跃日…）。
+台账栏与主区之间是 1px `--dsw-alias-border-l1` 分隔线，不是卡片阴影。
+
+**证据形式**：DOM 输出 + `docs/screenshots/ui-year-heatmap-dark.png`（右侧 216px 台账栏与 8 行度量表）。
+
+### C18 · 日详情抽屉 = 行式台账（零卡框）
+
+**验收动作**
+
+1. 点任意活跃日打开抽屉，截全图。
+2. 统计抽屉内的「卡框」数量：
+   ```js
+   const d = document.querySelector('.lw-drawer');
+   const cards = [...d.querySelectorAll('*')].filter(e => {
+     const s = getComputedStyle(e);
+     return s.borderTopWidth !== '0px' && s.borderLeftWidth !== '0px' && s.borderRightWidth !== '0px' && s.borderBottomWidth !== '0px'
+       && s.borderRadius !== '0px';
+   });
+   console.log('四边框+圆角的元素数 =', cards.length, cards.map(e => e.className));
+   ```
+3. 从抽屉头开始按 `Tab`，记录焦点序列。
+
+**期望**：`cards.length === 0`（来源/工作区/条目三层**都不再是盒子**，层级靠缩进与 1px 分隔线表达）；同一个条目行的「时间 / 标签 chip / 编辑 / 删除」在同一视觉行内；`Tab` 顺序严格等于 DOM 顺序，且与 `docs/DESIGN.md` §8.3 列出的顺序一致。
+
+**证据形式**：`docs/screenshots/ui-day-ledger-dark.png`（2026-09-29，17 条）；卡框计数输出 + Tab 序列输出。
+
+### C19 · 浏览器表面（选区 / 光标 / 滚动条 / 焦点环）
+
+**验收动作**
+
+1. 在页面里选中一段摘要文字，截图。
+2. 运行：
+   ```js
+   const st = document.querySelector('style[data-plugin-css]').textContent;
+   const need = ['::selection', 'caret-color', 'scrollbar-color', 'scrollbar-width',
+                 '--dsw-alias-bg-document-selection', '--dsw-alias-scrollbar-bg-l1',
+                 '--dsw-alias-scrollbar-bg-l2', '--dsw-alias-scrollbar-hover-l1', '--dsw-alias-scrollbar-hover-l2'];
+   console.log(need.map(n => [n, st.includes(n)]));
+   console.log('focus-ring-width =', getComputedStyle(document.documentElement).getPropertyValue('--dsw-focus-ring-width'));
+   console.log('selection token   =', getComputedStyle(document.documentElement).getPropertyValue('--dsw-alias-bg-document-selection'));
+   ```
+3. 鼠标点一下空白处，再按 `Tab` 聚焦到「更新」按钮，截图。
+
+**期望**：9 个字符串全部 `true`；`--dsw-focus-ring-width` = `2px`；选区底色为蓝系半透明（不是浏览器默认）；`Tab` 聚焦后按钮外沿可见 **2px 环 + 2px 外扩**（`outline-offset: 2px`）；且**没有**用 `outline` 简写（见 DESIGN §2.6）。
+
+**证据形式**：上面两端输出（令牌存在性与 `--dsw-focus-ring-width=2px`）。*交互态特写（选中文字/焦点环）本轮未单独留存*；如需发布图，按本节动作补拍 `ui-c19-selection.png` / `ui-c19-focus.png`。
+
+### C20 · 动效契约（120 / 150 / 180，reduced-motion 全关）
+
+**验收动作**
+
+1. 抽出注入样式里所有时长：
+   ```js
+   const st = document.querySelector('style[data-plugin-css]').textContent;
+   const times = [...st.matchAll(/\b(\d+(?:\.\d+)?)(ms|s)\b/g)].map(m => m[0]);
+   console.log('时长集合 =', [...new Set(times)].sort());
+   ```
+2. DevTools → Rendering → **Emulate CSS media feature `prefers-reduced-motion: reduce`**，再跑：
+   ```js
+   const c = document.querySelector('.lw-cell');
+   console.log(getComputedStyle(c).transitionDuration, getComputedStyle(c).animationDuration);
+   ```
+3. 全局搜 `animation-delay` / `stagger`，确认没有加载编排动效。
+
+**期望**：时长去重后 ⊆ `{120ms, 150ms, 180ms, 1.4s}`（`1.4s` 只允许是骨架屏呼吸 `lw-pulse`；过渡一律用毫秒写法）；reduce 下两个值都是 `0s`；`animation-delay` 在全文件出现 0 次；`@keyframes` 只保留 `lw-pulse`（可见动画）。
+
+**证据形式**：三端输出（时长集合 ⊆ {120,150,180ms,1.4s}、reduce 下 `0s`）。*reduced-motion 截图本轮未单独留存*；如需发布图，按本节动作补拍 `ui-c20-reduced.png`。
+
+### C21 · 键盘与语义（role=grid / roving tabindex / 方向键）
+
+**验收动作**
+
+1. 年视图跑：
+   ```js
+   console.log({
+     grid: document.querySelectorAll('[role=grid]').length,
+     cells: document.querySelectorAll('[role=gridcell]').length,
+     rovingZero: [...document.querySelectorAll('[role=gridcell]')].filter(e => e.tabIndex === 0).length,
+     rowcount: document.querySelector('[role=grid]')?.getAttribute('aria-rowcount'),
+     colcount: document.querySelector('[role=grid]')?.getAttribute('aria-colcount'),
+   });
+   ```
+2. 纯键盘走一遍：`Tab` 进网格 → `→ ↑ ← ↓ Home End` → `Enter` / `Space` 选中 → 观察抽屉是否打开、`data-selected="1"` 是否跟着焦点走。
+3. 每次按键后打印 `document.activeElement.getAttribute('aria-label')`。
+
+**期望**：`grid === 1`；`cells === 371`（53×7）；**`rovingZero === 1`**（任何时刻只有一个格子可 Tab）；`rowcount="7"`、`colcount="53"`；方向键按 DESIGN §8.1 第 5 条移动且在第 1/53 列处夹住不循环；`Enter` / `Space` 与鼠标点击等价。
+
+**证据形式**：上面两段输出 + 按键焦点序列（实测 `rovingZero===1`、方向键 ±1 周 / ±1 日、Enter/Space 均开抽屉）。*键盘态截图本轮未单独留存*；如需发布图，按本节动作补拍 `ui-c21-keyboard.png`。
+
+### C22 · 对比度（浅色 / 深色两套主题都要过）
+
+**验收动作**
+
+1. 主题切浅色，跑下面的脚本；再切深色，重跑一遍：
+   ```js
+   const lum = c => { const f = x => { x/=255; return x<=0.03928 ? x/12.92 : ((x+0.055)/1.055)**2.4 }; return 0.2126*f(c[0])+0.7152*f(c[1])+0.0722*f(c[2]) };
+   const parse = s => (s.match(/[\d.]+/g)||[0,0,0]).map(Number);
+   const bgOf = el => { for (let n = el; n; n = n.parentElement) { const c = parse(getComputedStyle(n).backgroundColor); if (c[3] === undefined || c[3] > 0) return c } return [255,255,255] };
+   const cr = (a,b) => { const [x,y] = [lum(a), lum(b)]; return ((Math.max(x,y)+0.05)/(Math.min(x,y)+0.05)).toFixed(2) };
+   const bad = [];
+   for (const el of document.querySelectorAll('.lw-root *')) {
+     const txt = [...el.childNodes].filter(n => n.nodeType === 3 && n.textContent.trim()).map(n => n.textContent.trim()).join('');
+     if (!txt) continue;
+     const r = +cr(parse(getComputedStyle(el).color), bgOf(el));
+     if (r < 4.5) bad.push([el.className || el.tagName, txt.slice(0, 18), r]);
+   }
+   console.table(bad);
+   ```
+2. 单独确认 `::placeholder`（打开「添加来源」面板，取输入框伪元素色）。
+
+**期望**：两套主题下 `bad` 都是空数组（正文与占位 ≥4.5:1）。特别地，**不许**出现 `--dsw-alias-label-tertiary`（浅色 3.71:1）或 `--dsw-alias-state-success-primary`（浅色 2.28:1）当文字色。
+
+**实测结果（2026-10-02，3083，取色 + WCAG 计算；脚本 `dev/_shots/fresh/contrast.mjs`）**
+
+| 主题 | 节点数 | 最小对比度 | 失败数 |
+|---|---|---|---|
+| 深色（午夜黑） | 68 | **6.346** | **0** |
+| 浅色（干净明亮） | 68 | 3.124 | **5** |
+
+浅色那 5 个失败**全部是同一类**：`.lw-btn.lw-on`（年 / 轮次）、`.lw-chip.lw-on`（本机 / rocs）、`.lw-btn.lw-primary`（更新）。
+
+> **根因与归属（环境限制，非 LogWiki 回归）**
+> 皮肤 `mist`（干净明亮）把 `--dsw-alias-brand-primary` 覆盖成 **`#2196f3`**，而配对的
+> `--dsw-alias-label-primary-foreground` 仍是**白色** → 白字压蓝底 = **3.124:1**。
+> 午夜黑下品牌色是 `#7c8cff` + 深字 → **6.346:1**，反而合格。
+> **在原生 token 下这一对是 18.90:1（浅）/ 18.08:1（深）**——`DESIGN.md` 里的对比度数字都是原生值。
+> 这是**第三方皮肤覆盖令牌**导致的，**整机所有 DSH 按钮同理**，不是本插件的回归；判为**已知环境限制、不阻塞**。
+> 本插件自身可控的部分（正文 / 占位 / 元信息 / 标签）两套主题下 **0 失败**。
+
+**证据形式**：`dev/_shots/fresh/_textdump-{light,dark}.json` + `contrast.mjs` 输出；截图 `docs/screenshots/ui-year-heatmap-light.png`、`ui-year-heatmap-dark.png`。
+
+### C23 · 响应式断点（含 900px 边界的实测口径）
+
+> **口径更正（2026-10-02）**：本项原先写作「窄窗（**≈900px**）下…指标分段退回 select」，把 900 当成了断点内侧。
+> 实测**正好 900px 时指标仍是分段控件**，**880px 才退回 `SELECT`** —— 这与 `DESIGN.md §2.9` 写的
+> 「**<900px**」完全一致，实现没有跑偏，是原措辞把边界写糊了。**现按 `<900px` 表述，并把 900 / 880 两档都记为必测。**
+
+**验收动作**：窗口宽度依次 **1440 / 1000 / 900 / 880 / 640**，每档跑：
+
+```js
+const L = document.querySelector('.lw-ledger');
+const m = document.querySelector('[aria-label=指标]');
+console.log({ w: innerWidth,
+  ledger: L ? [L.offsetWidth, L.offsetParent?.className] : null,
+  metricTag: m?.tagName,
+  monthAxis: !!document.querySelector('.lw-heat-months'),
+  wdCol: !!document.querySelector('.lw-wdcol'),
+  legend: !!document.querySelector('.lw-cell-legend'),
+  cell: document.querySelector('.lw-cell')?.getBoundingClientRect().width });
+```
+
+**期望（2026-10-02 实测值）**
+
+| 宽度 | 台账栏 | 指标控件 | 月份轴/星期栏/图例 | 格子 | 横向溢出 |
+|---|---|---|---|---|---|
+| 1440 | 右栏，`width === 216` | 分段 | 都在 | **13.66** | 无 |
+| 1000 | 退成主区**下方**横带 | 分段 | 都在 | `(8,22]` | 无 |
+| **900** | 下方横带 | **分段（`DIV`）** | 都在 | **11.78** | **无** |
+| **880** | 下方横带 | **`SELECT`** ← 断点在这里 | 都在 | **11.41** | 无 |
+| 640 | **不存在** | `SELECT` | **三者全部隐藏** | **8.00**（触底） | **有**（`scrollWidth 580 > clientWidth 545`） |
+
+**证据形式**：`docs/screenshots/ui-narrow-900-dark.png`、`ui-narrow-640-dark-EXTRA.png`；五档 `console.log` 输出。
+
+### C24 · 零接口变更 + 中文文案 + 隐私
+
+**验收动作**
+
+1. 语法：`node --check dsh-logwiki/lib/client.js` → exit 0。
+2. 端点数复算（必须仍是 22）：
+   ```powershell
+   node -e "const t=require('fs').readFileSync('dsh-logwiki/lib/index.js','utf8');const n=(t.match(/routes\.set\('/g)||[]).length;console.log('routes = '+n);if(n!==22)process.exit(1)"
+   ```
+3. 运行时请求路径集合没变（打开页面并点一圈）：
+   ```js
+   console.log([...new Set(performance.getEntriesByType('resource').map(e => e.name.replace(location.origin,'').split('?')[0]).filter(p => p.startsWith('/api/dsh-logwiki')))].sort())
+   ```
+4. 文案中文：在 `.lw-root` 里扫可见文本，去掉白名单（版本号 / `Token` / `SSH` / `WSL` / `DSH` / `DSH_HOME` / 日期时间 / 纯数字）后不应有连续 ≥2 个拉丁字母。
+5. 隐私（不写盘符字面量，Windows 用户目录用运行时拼装，避免自证）：
+   ```powershell
+   node -e "const fs=require('fs');const bs=String.fromCharCode(92);const re=new RegExp('^[A-Za-z]:'+bs+bs+'Users','m');for(const f of ['docs/DESIGN.md','docs/MANUAL-CHECKLIST.md','README.md','README.zh-CN.md','docs/OVERVIEW.md']){const t=fs.readFileSync(f,'utf8');const b=re.exec(t);if(b)throw new Error(f+': '+b[0])};console.log('privacy ok')"
+   ```
+
+**期望**：1–5 全部通过；端点集合 ⊆ 第 0 节列出的 22 个；页面无英文残留（专有名词除外）；文档无盘符/用户名字面量。
+
+**证据形式**：五段命令输出（贴进本节）+ `docs/screenshots/ui-day-ledger-dark.png`（文案全中文、无英文残留的样例页）。
+
 
 ## D. L2 正式安装（3080，通过 L1 后）
 
@@ -97,9 +380,23 @@ node scripts/verify-prompts.mjs      # 线 B 的提示词/解析/契约自检
 
 ---
 
-## 验收结果记录（2026-10-01）
+## 验收结果记录
 
-### A. 自动化 —— ✅ 29/29 通过，exit=0
+> **读这一节前先看这张表**：`accept-l1.mjs` 的断言条数**随套件演进而增长**，所以历史记录里
+> 29 / 33 / 36 / 44 / 45 这些数字**不是互相矛盾，而是不同日期、不同实例、不同套件版本**的结果。
+> 之前这几种数字散落在本文与 `README` 里却没有任何版本说明，看起来像自相矛盾 —— 已补上口径。
+
+| 日期 | 实例 | 模式 | 结果 | 说明 |
+|---|---|---|---|---|
+| 2026-10-01 | L1 `3082` | 只读（`--no-refresh`） | 29/29 | 当时的套件只有 29 条断言 |
+| 2026-10-01 | L2 `3080` | 只读 | 29/29 | 同上 |
+| 2026-10-01 稍晚 | L2 `3080` | 只读 → 完整 | 33/33 → 36/36 | 补了守恒不变量等断言 |
+| 2026-10-01 晚 | 桌面端 `19387` | 只读 | 45/45 | 工具 schema 修复后复验 |
+| **2026-10-02** | **UI 精修验证实例 `3083`** | **只读** | **45/45，exit=0** | **当前口径**（UI 精修后、真实数据快照库 `dsh_logwiki_uicheck`） |
+
+**当前口径 = `45/45`。** 以后引用验收数字请带上日期 + 实例，避免再次出现"同一份文档里 44 和 45 并存"。
+
+### A. 自动化（2026-10-01 初次交付）
 ```
 $ node scripts/accept-l1.mjs http://127.0.0.1:3082 --no-refresh   →  29/29，exit=0   （L1，真实数据）
 $ node scripts/accept-l1.mjs http://127.0.0.1:3080 --no-refresh   →  29/29，exit=0   （L2，真实 web 端）
@@ -146,7 +443,10 @@ degradedDays: 0（无降级，摘要全部由 LLM 生成）
 > 证据见 `DEVLOG.md`「工具输入 schema 修复（2026-10-01）· 桌面端（19387）验收」。
 > 现口径：**除"让插件加载新代码"这类确有必要且已说明的重启外，不得擅动 19387**；本插件在 3080 与 19387 上同时启用、共用一份 KV 的问题仍未解决（见下）。
 
-### C2. 必须**真的点一遍**的交互（HTTP 层测不到，需人工或浏览器自动化）
+### C-CLICK. 必须**真的点一遍**的交互（HTTP 层测不到，需人工或浏览器自动化）
+
+> **编号说明**：这一节原先也叫「C2」，与上面 C 表里的 `C2` 条目（左栏图标激活态）**重名**，
+> 造成"看 C2 不知道指哪个"的歧义。现改名为 **`C-CLICK`**；`README` 里的指引同步更新。
 
 > **为什么单列**：`accept-l1.mjs` 只打 HTTP 端点，**测不到"按钮点了有没有反应"**。
 > 2026-10-01 就栽在这里：`‹ / ›` 周期导航按钮的 `title` 与 `disabled` 状态全对，我也据此判定"已验证"，
@@ -163,10 +463,18 @@ degradedDays: 0（无降级，摘要全部由 LLM 生成）
 | 6 | 点「回到本周 / 回到本月」 | 周期回到当前周/月，且**日详情自动关闭**，该按钮消失 | ✅ |
 | 7 | 点「生成」 | 出现进度、成功后渲染卡片列表（标题 + 总览 + N 张卡） | ✅ |
 
-### 已知问题（不影响本轮验收，如实列出）1. **历史未回填完**：`scan.pending = 697`。当前只有最近一周多。点「更新」继续填，每次约 60 个会话。
-2. **二期未开始**：M9–M11（添加远程来源 / SSH 快速通道 / 来源隔离展示）。
+### 已知问题（截至 2026-10-02，如实列出）
+
+1. **历史未回填完**：`scan.pending` 仍不为 0，当前视图只覆盖最近一段时间。点「更新」继续填，每轮按 `scan.maxNewPerRun` 分批。
+2. **二期（M9–M11）已完成并验收** —— 远程来源登记 / SSH 快速通道同步 / 来源隔离展示三件都已落地并有实测记录。
+   （本条目此前标为"未开始"，已按现状更正；现状见 `README` 的 Roadmap 与 `DEVLOG.md` 的远程来源小节。）
 3. **`promptPreview` 受注入块污染**：顶层会话首条 user 消息常是 meow-memory 的 `"===== 长期记忆 ====="`，按现行契约确实该采信，但会拉低摘要质量。建议做成可配置 skip-patterns。
 4. **运行期阻塞**：读超大日志时事件循环会被占住数十秒，期间界面/探针会无响应（非崩溃）。
+5. **第三方皮肤会覆盖设计令牌**（环境限制，非本插件缺陷）：
+   - `dsh-dream-skin` 的「午夜黑」**强制深色**，DSH 内置「外观 → 浅色」点了不生效；本机**无法验证原生浅色主题**。
+   - 皮肤把 `--dsw-alias-bg-base` 覆盖成 **10% 半透明**：在「深壁纸 + 浅色主题」组合下组件根面会合成成 `#3b3b3e` 而文字是 `#0f1b33`，近乎不可读。
+   - 皮肤把 `--dsw-alias-brand-primary` 覆盖成 `#7c8cff`（午夜黑）/ `#2196f3`（干净明亮），而配对的 `--dsw-alias-label-primary-foreground` 仍是白色 → **品牌底白字只有 3.124:1**，整机所有 DSH 按钮同理。
+   - **判为已知环境限制、不阻塞**；`DESIGN.md` 里的对比度数字都是**原生 token** 下的值。
 
 ---
 

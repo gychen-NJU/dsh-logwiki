@@ -8,9 +8,17 @@
 ![DSH](https://img.shields.io/badge/DSH-%E2%89%A50.2.0--rc.2-blue)
 ![零构建](https://img.shields.io/badge/build-none%20(hand--written%20ESM)-green)
 
-![年视图热力图](docs/screenshots/l1-real-01-heatmap.png)
+![年视图：热力图 + 年度台账栏](docs/screenshots/ui-year-heatmap-dark.png)
 
-![日详情三层卡片](docs/screenshots/l1-real-02-day.png)
+![日详情：行式台账](docs/screenshots/ui-day-ledger-dark.png)
+
+> 插件界面为中文（面向主要使用者的有意选择）。截图为真实界面
+> （左栏的工作区名与会话标题已打码，其余未作任何处理）。
+>
+> ⚠️ **主题说明**：上面两张是**深色**。拍摄所用的机器上装了一个第三方换肤插件
+> （`dsh-dream-skin`「午夜黑」），它**强制深色**，DSH 内置的「外观 → 浅色」点了不生效，
+> 因此**原生浅色主题在那台机器上无法验证**。下面那张浅色图是在把该皮肤切到「干净明亮」
+> 后拍的，拍完已切回。完整口径见 [`docs/MANUAL-CHECKLIST.md`](docs/MANUAL-CHECKLIST.md) 的 C12 节。
 
 ---
 
@@ -26,13 +34,15 @@
 
 | 能力 | 实现 |
 |---|---|
-| 日历 + 工作量热力图 | GitHub 风格 53×7 网格；指标可切 回合 / Token / 会话数 / 条目数；阈值按可见窗口的分位数（p25/p50/p75/p90）分档 |
-| 点进某天看做了什么 | 抽屉式详情，**来源 → 工作区 → 任务条目** 三层卡片 |
-| 一句话任务卡 | 时间 + 一句话总结 + 关键词标签 + 来源会话数；按时间升序；卡片风格 |
+| 日历 + 工作量热力图 | GitHub 风格 53×7 网格，**格子边长按容器宽度算出来**（`clamp((容器宽 − 星期栏 − 3×52) / 53, 8, 22)px`），宽窗吃满、窄窗触底 8px 并改为横向滚动（不裁切）；指标可切 回合 / Token / 会话数 / 条目数；阈值按可见窗口的分位数（p25/p50/p75/p90）分档 |
+| 年度台账栏 | 网格右侧 **216px 度量表**（轮次 / 会话 / 条目 / Token / 活跃日 / 最长连续 / 最忙的一天 / 平均每活跃日）+ 月份活动条 + 近期活动索引 —— 低对齐度的度量表，**刻意不做**大数字 hero 面板 |
+| 点进某天看做了什么 | 抽屉式详情做成**行式台账**：来源 → 工作区 → 任务条目，层级靠缩进与发丝线表达，**不再是嵌套卡片** |
+| 一句话任务条目 | 时间列 + 一句话总结 + 关键词标签 + 来源会话数；按时间升序 |
 | 标签可编辑 | 条目可编辑/删除/新增；手改后打 `已手改` 徽章且**永不被重算覆盖**，同时被排除出 LLM 输入 |
 | 手动更新 | 「更新」按钮 + SSE 实时进度；增量、分批、从新到旧，可断点续跑 |
 | 周/月简报 | 插件内直调 LLM 归纳并**落库留存**；「重新生成」才覆盖；另有「交给智能体」按钮把提示词写进输入框 |
 | 周期导航 | 简报**跟随你正在看的那一天**（点 9/25 就出 9/25 那一周），并可用 `‹ ›` 在**有活动的周期之间**前后跳 |
+| 键盘与主题 | 热力图是真的 `role="grid"`：roving tabindex、方向键移动、Enter/Space 打开当天；颜色只用 `--dsw-*` token，有明确的对比度下限与 `prefers-reduced-motion` 开关 |
 
 **来源隔离**：内部键是 `<来源>::<会话>`，条目 id 也含来源，日详情第一层就是来源分区 —— 所以「本机 + 远程服务器」各自成分区是数据结构原生支持的，二期把采集通道接通了（见文末 Roadmap）。
 
@@ -91,7 +101,13 @@ git clone https://github.com/gychen-NJU/dsh-logwiki.git
    - ⚠️ 读超大日志（5 MB 级、多帧 zstd 解压 + 重放校验）会占住 Node 事件循环数十秒，**期间页面会发顿**——这是预期行为，不是崩溃。
 5. 「**周总结**」/「**月总结**」：跟随选中日期；有缓存直接显示，没有就点「生成」。「交给智能体」会把提示词写进输入框（不支持时给可复制文本框）。
 
-![周总结](docs/screenshots/l2-3080-digest.png)
+![周总结](docs/screenshots/ui-digest-dark.png)
+
+![月视图](docs/screenshots/ui-month-dark.png)
+
+![浅色主题下的年视图](docs/screenshots/ui-year-heatmap-light.png)
+
+![窄窗 900px 下的同一界面](docs/screenshots/ui-narrow-900-dark.png)
 
 ## 配置
 
@@ -160,9 +176,13 @@ node scripts/verify-zstd-frames.mjs   # 多重 zstd frame 解码 8 断言
 node scripts/migrate-unit.mjs dsh_logwiki_web --dry-run
 ```
 
-当前结果：**只读 44/44（exit=0）**；离线四套件 159/0 · 103/0 · 70/70 · 8/8。
+当前结果：**只读 45/45（exit=0）**（2026-10-02，UI 精修验证实例，unit `dsh_logwiki_uicheck`）；离线四套件 159/0 · 103/0 · 70/70 · 8/8。
 
-> `accept-l1.mjs` 只打 HTTP 端点，**测不到"按钮点了有没有反应"**。点击类交互另见 [`docs/MANUAL-CHECKLIST.md`](docs/MANUAL-CHECKLIST.md) 的 C2 节清单。
+> `accept-l1.mjs` 的断言条数是**随套件一起长出来的**，所以 [`docs/MANUAL-CHECKLIST.md`](docs/MANUAL-CHECKLIST.md)
+> 的历史记录里会出现 29 / 33 / 36 / 44 —— 那是**不同日期 / 不同实例 / 不同套件版本**的结果，不是自相矛盾。
+> 该文件现在带一张按日期的结果表；**当前口径是 45/45**。
+
+> `accept-l1.mjs` 只打 HTTP 端点，**测不到"按钮点了有没有反应"**。点击类交互另见 [`docs/MANUAL-CHECKLIST.md`](docs/MANUAL-CHECKLIST.md) 的 **`C-CLICK`** 节清单。
 
 ## 代码结构
 

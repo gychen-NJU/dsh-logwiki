@@ -329,18 +329,62 @@ export function vendorStatus(): unknown   // 每个解析根的失败原因，�
 - 只 `fetch('/api/dsh-logwiki/*')` 取数；变更类带 `x-logwiki: 1`。
 - 每个区块独立容错 + 顶层错误边界；`prefers-reduced-motion` 下关动画。
 
+**视觉尺度与浏览器表面 token 清单**（完整契约见 [`docs/DESIGN.md`](DESIGN.md)；这里是给改代码的人用的速查表）
+
+| 用途 | token | 取值 |
+|---|---|---|
+| 正文 / 次要文字 / 装饰 | `--dsw-alias-label-primary` / `-secondary` / `-tertiary` | 12–14px；**最小字号 12px**，禁用 `--dsw-font-xxxs-11-*` |
+| 字号 12 / 13 / 14 | `--dsw-font-xxs-12-font-size` / `-xs-13-` / `-s-14-` | 12 / 13 / 14px（行高 18 / 20 / 22px） |
+| 数字 | `font-variant-numeric: tabular-nums` | 在 `.lw-root` 上统一声明 |
+| 主操作 / 选中态 | `--dsw-alias-brand-primary` + `--dsw-alias-label-primary-foreground` | 本应用是**单色品牌色**（浅 `#0f1115` / 深 `#f9fafb`），配对前景是它的反色 |
+| 活动绿阶（**只表达"量"**） | `--dsw-lw-heat`（插件自有，**全文件只声明一次**，`#39d353`）→ 组件消费别名 `--lw-heat` | 只允许热力图色阶 / 图例 / 月视图强度条三处消费 |
+| 圆角 | `--dsw-radius-xs` / `-sm` / `-md` | 4 / 8 / 12px |
+| 分隔线 / 控件边框 / chip 边框 | `--dsw-alias-border-l1` / `-l2` / `-l3` | — |
+| hover / 按下底 | `--dsw-alias-interactive-bg-hover` / `-bg-active` | — |
+| 文档选区 | `--dsw-alias-bg-document-selection` | `::selection` 用它 |
+| 光标 | `caret-color: var(--dsw-alias-brand-primary)` | — |
+| 滚动条（细/粗、两级 hover） | `--dsw-alias-scrollbar-bg-l1` / `-bg-l2` / `-hover-l1` / `-hover-l2` | 横向滚动用 l1、纵向容器用 l2 |
+| 焦点环 | `outline-width: var(--dsw-focus-ring-width, 2px)` + `outline-color: var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary))` + `outline-offset: 2px` | **禁止 `outline` 简写**：平台 `focus.css` 已全局接管，简写会覆盖它的鼠标模态抑制规则 |
+| 动效 | 120ms（选中）/ 150ms（其余状态）/ 180ms（抽屉） | `prefers-reduced-motion` 下全关；不做加载编排动效 |
+
+> **平台没有间距 token**：`--dsw-*` 里不存在 `space` / `gap` / `size` 类名，padding / gap 直接用 4 的倍数像素。
+>
+> **第三方皮肤会覆盖 token**：装了换肤插件（本机是 `dsh-dream-skin`）时，`--dsw-alias-brand-primary`、`--dsw-alias-bg-base` 等会被皮肤改写（例如 `bg-base` 变成 10% 半透明、品牌色从单色换成 `#7c8cff` / `#2196f3`）。**上面那张表的取值是原生 token 下的值**；对比度结论也以原生 token 为准。
+
 ---
 
 ## 4. 配置（`config` 块，patch 整体替换不深合并）
 
 ```yaml
-scan:      { sinceDays: 365, maxSessions: 2000 }
-summarize: { provider: deepseek-official, model: deepseek-flash, maxTokens: 2048,
+scan:      { sinceDays: 365, maxSessions: 2000, maxNewPerRun: 300 }
+summarize: { provider: deepseek-official, model: deepseek-flash, maxTokens: 8192,
              timeoutMs: 60000, maxConcurrency: 2, onlyTopLevelSessions: true }
 heatmap:   { metric: turns, includeSubagents: true }
 ui:        { language: zh, weekStart: 1 }
-remote:    { enable: false, sinceDays: 90, maxBytesPerSync: 33554432 }
+store:     { unit: '' }        # 空 = 按 profile 派生 dsh_logwiki_<profile>
+remote:    { enable: false, sinceDays: 90, maxBytesPerSync: 33554432,
+             maxFilesPerSync: 400, maxBytesPerFile: 67108864,
+             commandTimeoutMs: 120000, maxSourcesPerRun: 3 }
 ```
+
+> ⚠️ **`summarize.maxTokens` 是 8192，不是 2048。** 本文件曾长期写 2048，与实际发货值不符。
+> 实测口径：调到 2048 会把简报输出**截断**，生成直接失败（`README` 的配置表里有同样的警告）。
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `scan.sinceDays` | 365 | 回填窗口（天） |
+| `scan.maxSessions` | 2000 | 候选会话上限 |
+| `scan.maxNewPerRun` | 300 | 单次「更新」最多处理多少个**新增**会话（已入库的廉价跳过） |
+| `summarize.maxTokens` | 8192 | 条目/简报单次输出上限；**不得调小** |
+| `heatmap.metric` | `turns` | 默认指标；客户端可覆盖 |
+| `store.unit` | `''`（派生） | 空则派生 `dsh_logwiki_<profile>`；显式填则钉住（见 §3 `lib/store.js`） |
+| `remote.enable` | false | 总开关：开了之后「更新」顺带同步所有已启用来源 |
+| `remote.sinceDays` | 90 | 远程来源只同步最近多少天的会话 |
+| `remote.maxBytesPerSync` | 33554432 | 单次同步总字节预算 |
+| `remote.maxFilesPerSync` | 400 | 单次同步最多拉多少个文件 |
+| `remote.maxBytesPerFile` | 67108864 | 单文件上限（按 base64 **编码后**体积算） |
+| `remote.commandTimeoutMs` | 120000 | 单条远端命令超时 |
+| `remote.maxSourcesPerRun` | 3 | 一次「更新」最多同步几个来源 |
 
 `summarize.provider/model` 未配置时回退 `ctx.get('agentDefaultModel')?.currentSelection()`。
 

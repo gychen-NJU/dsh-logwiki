@@ -8,11 +8,18 @@
 ![DSH](https://img.shields.io/badge/DSH-%E2%89%A50.2.0--rc.2-blue)
 ![build](https://img.shields.io/badge/build-none%20(hand--written%20ESM)-green)
 
-![Year heatmap](docs/screenshots/l1-real-01-heatmap.png)
+![Year view: heatmap + yearly ledger rail](docs/screenshots/ui-year-heatmap-dark.png)
 
-![Day detail: three-layer cards](docs/screenshots/l1-real-02-day.png)
+![Day detail: row-based ledger](docs/screenshots/ui-day-ledger-dark.png)
 
-> The plugin UI is in Chinese (a deliberate choice for its primary user). Screenshots show the real UI.
+> The plugin UI is in Chinese (a deliberate choice for its primary user). Screenshots show the real UI
+> (workspace names and session titles in the left sidebar are blurred out — everything else is untouched).
+>
+> ⚠️ **Theme note:** the screenshots above are **dark**. On the machine they were taken on, a third-party
+> skin plugin (`dsh-dream-skin`, "Midnight") **forces dark mode** and DSH's built-in *Appearance → Light*
+> has no effect, so the **native light theme could not be verified there**. The light screenshot below was
+> taken with that skin switched to "Clean & Bright" and then switched back. See
+> [`docs/MANUAL-CHECKLIST.md`](docs/MANUAL-CHECKLIST.md) §C12 for the full wording.
 
 ---
 
@@ -28,13 +35,15 @@ You spend a day working in DSH, but **the logs are stored per session** — to a
 
 | Capability | Implementation |
 |---|---|
-| Calendar + workload heatmap | GitHub-style 53×7 grid; metric switchable between turns / tokens / sessions / entries; thresholds are quantiles (p25/p50/p75/p90) over the visible window |
-| Click a day to see what happened | Drawer detail with three layers: **source → workspace → task entry** |
-| One-line task cards | time + one-sentence summary + keyword tag + number of source sessions; sorted by time; card style |
+| Calendar + workload heatmap | GitHub-style 53×7 grid whose cell size is **derived from the container width** (`clamp((W − weekday rail − 3×52) / 53, 8, 22)px`), so a wide window uses the space and a narrow one floors at 8px and scrolls instead of clipping; metric switchable between turns / tokens / sessions / entries; thresholds are quantiles (p25/p50/p75/p90) over the visible window |
+| Yearly ledger rail | a **216px metrics table** beside the grid (turns / sessions / entries / tokens / active days / longest streak / busiest day / average per active day) plus a month activity strip and a recent-days index — a low-alignment table, deliberately **not** a big-number hero panel |
+| Click a day to see what happened | Drawer detail as a **row-based ledger**: source → workspace → task entry, expressed with indentation and hairlines instead of nested cards |
+| One-line task entries | time column + one-sentence summary + keyword tag + number of source sessions; sorted by time |
 | Editable tags | entries can be edited / deleted / added; edited ones get an `edited` badge and are **never overwritten**, and are excluded from LLM input |
 | Manual refresh | a `更新` (Refresh) button with live SSE progress; incremental, batched, newest-first, resumable |
 | Weekly / monthly briefs | summarised in-plugin via `ctx.llm` and **persisted**; only "regenerate" overwrites; a "hand to the agent" button writes the prompt into the composer |
 | Period navigation | the brief **follows the day you are looking at** (click Sep 25 → you get that week), and `‹ ›` steps between periods **that actually have activity** |
+| Keyboard & theming | the heatmap is a real `role="grid"` with roving tabindex, arrow-key navigation and Enter/Space to open a day; colours come from `--dsw-*` tokens only, with a documented contrast floor and a `prefers-reduced-motion` kill-switch |
 
 **Source isolation** is structural: internal keys are `<source>::<session>`, entry ids include the source, and the first layer of the day detail is a source partition — so "local + remote server" showing up as separate partitions needed no schema change; phase 2 just wired up the collection path (see Roadmap).
 
@@ -94,7 +103,13 @@ Restart that instance and a **任务日历** (Task Calendar) icon appears in the
    - ⚠️ Reading a very large log (5 MB class, multi-frame zstd + replay validation) blocks the Node event loop for tens of seconds; **the page will feel sluggish during that window** — expected behaviour, not a crash.
 5. **周总结 / 月总结** (weekly / monthly brief): follows the selected date; shows the cached brief if present, otherwise click "generate". "Hand to the agent" writes the prompt into the composer (with a copyable textarea as fallback).
 
-![Weekly brief](docs/screenshots/l2-3080-digest.png)
+![Weekly brief](docs/screenshots/ui-digest-dark.png)
+
+![Month view](docs/screenshots/ui-month-dark.png)
+
+![Year view in the light theme](docs/screenshots/ui-year-heatmap-light.png)
+
+![Same view at 900px wide](docs/screenshots/ui-narrow-900-dark.png)
 
 ## Configuration
 
@@ -164,9 +179,14 @@ node scripts/verify-zstd-frames.mjs   # multi-frame zstd decoding, 8 assertions
 node scripts/migrate-unit.mjs dsh_logwiki_web --dry-run
 ```
 
-Current result: **read-only 44/44 (exit 0)**; offline suites 159/0 · 103/0 · 70/70 · 8/8.
+Current result: **read-only 45/45 (exit 0)** on the UI-polish verification instance (2026-10-02, unit `dsh_logwiki_uicheck`); offline suites 159/0 · 103/0 · 70/70 · 8/8.
 
-> `accept-l1.mjs` only hits HTTP endpoints and therefore **cannot tell whether a button actually does anything**. Click-driven interactions have their own list in section C2 of [`docs/MANUAL-CHECKLIST.md`](docs/MANUAL-CHECKLIST.md).
+> The assertion count in `accept-l1.mjs` **grew as the suite grew**, so older records in
+> [`docs/MANUAL-CHECKLIST.md`](docs/MANUAL-CHECKLIST.md) show 29 / 33 / 36 / 44 — those are *earlier dates,
+> instances and suite versions*, not a contradiction. That file now carries a dated results table; the
+> current figure is 45/45.
+
+> `accept-l1.mjs` only hits HTTP endpoints and therefore **cannot tell whether a button actually does anything**. Click-driven interactions have their own list in the **`C-CLICK`** section of [`docs/MANUAL-CHECKLIST.md`](docs/MANUAL-CHECKLIST.md).
 
 ## Code layout
 

@@ -2,6 +2,9 @@
 # meow-memory 的记忆数据库（私有数据）
 .dsh-meow/
 
+# AgentTeams 团队运行时状态（花名册 / 任务板 / 邮箱）——协作过程产物，不是交付物
+.agent-teams/
+
 # 运行时日志：3080.out.log 里含**带 token 的访问 URL**
 dev/*.log
 dev/*.out
