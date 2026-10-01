@@ -36,6 +36,15 @@ const DEFAULT_CONFIG = Object.freeze({
   },
   heatmap: { metric: 'turns', includeSubagents: true },
   ui: { language: 'zh', weekStart: 1 },
+  /**
+   * 存储：`unit` 空字符串 = **按实例自动分库**（推荐）。
+   *
+   * 起因：同一 `$DSH_HOME` 下多实例（桌面端 + web 端）会落到同一个
+   * `storages/dsh_logwiki.json`，而落盘是"整份读进内存 → 改 → 整份写回"，
+   * 两进程各持旧快照 → 后写者把先写者抹掉（lost update）。
+   * 显式填了就用显式值（用于固定实例名，或把老库挂到新实例上）。
+   */
+  store: { unit: '' },
   remote: {
     enable: false,
     sinceDays: 90,
@@ -414,12 +423,55 @@ export function apply(ctx, config = {}) {
   /** @type {null | ReturnType<typeof import('./store.js').createStore>} */
   let store = null
 
+  /**
+   * 本实例的 profile 名（`profileContext.name`，如 `web` / `desktop`）。
+   * 取不到就返回 ''，由下面的分库逻辑退回默认 unit —— **绝不因为拿不到名字而报错**。
+   */
+  function profileNameOf() {
+    try {
+      const profileContext = ctx.get('profileContext')
+      const name = profileContext?.name
+      return typeof name === 'string' ? name : ''
+    } catch {
+      return ''
+    }
+  }
+
+  /**
+   * 本实例使用的 storage unit 名。
+   *
+   * 优先级：显式 `config.store.unit` → 按 profile 名自动分库（`dsh_logwiki_<profile>`）
+   * → 默认 `dsh_logwiki`。**目的是让"同时装了两个实例"天然安全**，不必依赖使用者记得改配置。
+   * 实际生效的名字会出现在 `/ping` 与 `/health`，可远程核对。
+   */
+  function resolveUnitName() {
+    const explicit = resolved.store?.unit
+    if (typeof explicit === 'string' && explicit.trim() !== '') return explicit.trim()
+    if (mods.store === null || typeof mods.store.unitNameFor !== 'function') return null
+    return mods.store.unitNameFor(profileNameOf())
+  }
+
+  /**
+   * 对外可核对的 unit 名：store 已建则由它回报实际值，否则回报"将会用哪个"。
+   * 验收/排查时不必猜，`GET /api/dsh-logwiki/ping` 直接看。
+   */
+  function activeUnitName() {
+    if (store !== null && typeof store.unitName === 'string') return store.unitName
+    return resolveUnitName() ?? '(unavailable)'
+  }
+
   async function ensureStore() {
     if (store !== null) return store
     if (mods.store === null) return null
     try {
-      store = mods.store.createStore(ctx)
+      const unit = resolveUnitName()
+      store = mods.store.createStore(ctx, unit === null ? {} : { unit })
       await store.ready
+      const active = typeof store.unitName === 'string' ? store.unitName : '(unknown)'
+      const why = typeof resolved.store?.unit === 'string' && resolved.store.unit.trim() !== ''
+        ? 'config.store.unit'
+        : `profile '${profileNameOf() || '?'}'`
+      log(`[dsh-logwiki] store unit = ${active}（来源：${why}）`)
     } catch (error) {
       warn(`[dsh-logwiki] store 初始化失败：${error instanceof Error ? error.message : String(error)}`)
       store = null
@@ -1219,6 +1271,8 @@ export function apply(ctx, config = {}) {
       version: VERSION,
       now: Date.now(),
       config: resolved,
+      // 本实例实际使用的存储 unit（多实例分库后，靠它核对"有没有各写各的"）
+      store: { unit: activeUnitName() },
       modules: Object.keys(mods).reduce((acc, k) => ({ ...acc, [k]: mods[k] !== null }), {}),
       modErrors,
     })
@@ -1235,7 +1289,9 @@ export function apply(ctx, config = {}) {
       modules: Object.keys(mods).reduce((acc, k) => ({ ...acc, [k]: mods[k] !== null }), {}),
       modErrors,
       tools: { registered: registeredTools, errors: toolErrors, inputFingerprints: toolFingerprints },
-      store: db === null ? { ready: false } : { ready: true, writable: db.writable === true },
+      store: db === null
+        ? { ready: false, unit: activeUnitName() }
+        : { ready: true, writable: db.writable === true, unit: db.unitName ?? activeUnitName() },
     })
   })
 

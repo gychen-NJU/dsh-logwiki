@@ -2,14 +2,15 @@
  * vendor-dsh.js —— **本插件唯一允许 import `@deepseek-ai/*` 的文件**。
  *
  * 背景（已实测，2026-10-01，Node v24.16.0）：
- *   插件目录 `E:\GalaxyC\DSH\DSH-LogWiki\dsh-logwiki` 位于任何 node_modules 解析链之外，
- *   裸写 `import '@deepseek-ai/dsh-llm'` 必然 ERR_MODULE_NOT_FOUND。
- *   所以这里用 `node:module` 的 `createRequire(filename)` 把解析根钉到 DSH 安装目录，
- *   先 resolve 出真实文件路径，再 `import(pathToFileURL(...))` 动态加载。
+ *   插件目录位于任何 node_modules 解析链之外，裸写 `import '@deepseek-ai/dsh-llm'`
+ *   必然 ERR_MODULE_NOT_FOUND。所以这里用 `node:module` 的 `createRequire(filename)`
+ *   把解析根钉到 **派生出来的** DSH 安装目录，先 resolve 出真实文件路径，
+ *   再 `import(pathToFileURL(...))` 动态加载。
  *
- * 实测结果（两个根都能解析并 import 成功）：
- *   @deepseek-ai/dsh-llm     -> C:\Users\13676\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh\node_modules\@deepseek-ai\dsh-llm\lib\index.js       (v0.2.0-rc.2, 66 exports)
- *   @deepseek-ai/dsh-timeout -> C:\Users\13676\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh\node_modules\@deepseek-ai\dsh-timeout\lib\index.js   (v0.2.0-rc.2,  6 exports)
+ * 解析根**不写死**（见 lib/paths.js `vendorRoots()`）：本仓库是公开的，
+ * 写死 `C:/Users/<某人>/...` 既泄漏私有信息、换台机器也直接失效。
+ * 覆盖 npm 全局安装、profile 自带依赖、桌面端 Electron 运行时（app.asar）三种形态；
+ * 需要非标准布局时用环境变量 `DSH_LOGWIKI_VENDOR_ROOTS`（`path.delimiter` 分隔）显式覆盖。
  *
  * 降级契约（硬要求）：
  *   **解析失败绝不允许打崩 boot**。本模块顶层只 import `node:` 内置模块，
@@ -29,15 +30,13 @@ import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { vendorRoots } from './paths.js'
 
 /**
- * 解析根，按顺序尝试。第一个是 profile 层（`@deepseek-ai/*` 的 junction 目录），
- * 第二个是全量安装的真实 node_modules（profile 那层是 junction，实际指向这里）。
+ * 解析根，按优先级排列，**全部派生**（见 lib/paths.js）。
+ * 只保留真实存在的目录；顺序在进程内固定（首次 import 时求值一次）。
  */
-export const REQUIRE_ROOTS = Object.freeze([
-  'C:/Users/13676/.dsh/profiles/node_modules',
-  'C:/Users/13676/AppData/Roaming/npm/node_modules/@deepseek-ai/dsh/node_modules',
-])
+export const REQUIRE_ROOTS = Object.freeze(vendorRoots())
 
 /** 需要转出的东西。 */
 const SPEC = Object.freeze({

@@ -111,6 +111,7 @@ Restart that instance and a **任务日历** (Task Calendar) icon appears in the
 | `heatmap.metric` | `turns` | default metric |
 | `heatmap.includeSubagents` | true | whether subagent work counts towards the heatmap |
 | `ui.language` / `weekStart` | `zh` / `1` | language / first day of week |
+| `store.unit` | *(empty = auto)* | storage unit name. Empty derives **`dsh_logwiki_<profile>`** per instance (see [Where data lives](#where-data-lives)). Set it only to pin a fixed name or to reattach an existing database. |
 | `remote.enable` | false | master switch: when on, **Refresh** also syncs every enabled remote source (clicking "sync" on a single source is not gated by it) |
 | `remote.maxFilesPerSync` | 400 | max files pulled per sync |
 | `remote.maxBytesPerFile` | 67108864 | per-file cap (**measured after base64 encoding** — do not size it against the raw file) |
@@ -120,9 +121,25 @@ Restart that instance and a **任务日历** (Task Calendar) icon appears in the
 
 ## Where data lives
 
-- Structured data goes through `ctx.storage` into **`$DSH_HOME/storages/dsh_logwiki.json`**: entries, briefs, sources, sync ledger, session fingerprints.
-- **Do not hand-edit** that file — it is the plugin's only persistent store.
-- ⚠️ The file is **shared by every instance with the same `$DSH_HOME`**. **Only one instance should have this plugin enabled at a time**, otherwise you get concurrent writes.
+- Structured data goes through `ctx.storage` into **`$DSH_HOME/storages/<unit>.json`**: entries, briefs, sources, sync ledger, session fingerprints.
+- **The unit name is per instance.** With the default empty `store.unit`, the plugin derives `dsh_logwiki_<profile>` from the profile it is running under — `dsh_logwiki_web`, `dsh_logwiki_desktop`, … If no profile context is available at all, it falls back to the legacy `dsh_logwiki`.
+- **Why this matters.** Running two instances against one `$DSH_HOME` is normal (the Desktop app *and* a `dsh web` server — or two `dsh web` profiles). Sharing a unit would be unsafe, because the store rewrites the **whole document** on every flush: two processes each hold their own in-memory snapshot, so whichever writes last silently erases everything the other wrote (a classic lost update). One unit per instance removes that failure mode completely — no locking, no merging, no single-writer discipline to remember.
+- **Unit names must match `^[a-z][a-z0-9_]*$`** — DSH's own rule, so **no dots or dashes**. That is why the separator is `_` (`dsh_logwiki_web`) and not `.` (`dsh_logwiki.web` would be rejected outright).
+- **Do not hand-edit** the file — it is the plugin's only persistent store, and its header carries a `unit.name` that is validated on open.
+- **Which unit is actually in use?** `GET /api/dsh-logwiki/ping` (and `/health`) reports it under `store.unit`. Check that instead of guessing.
+
+### Migrating an existing database
+
+Older versions always used the bare `dsh_logwiki` unit, so after upgrading, each instance starts from an empty database until you copy the old one over. Use the bundled script:
+
+```powershell
+node scripts/migrate-unit.mjs dsh_logwiki_web       # legacy database -> the web instance
+node scripts/migrate-unit.mjs dsh_logwiki_desktop   # legacy database -> the Desktop instance
+```
+
+- The script **rewrites the `unit.name` header** as well. Renaming the file alone does not work: the storage layer validates the header against the expected name and refuses with `missing or foreign unit header`.
+- The **source file is never modified**; the target is not overwritten unless you pass `--force`; `--dry-run` reports what would happen. Run it once per instance, then restart that instance.
+- A non-zero exit code means nothing was written.
 
 ## Verification
 
@@ -130,7 +147,7 @@ Restart that instance and a **任务日历** (Task Calendar) icon appears in the
 cd <repo>/dsh-logwiki
 
 # Against a PRODUCTION instance: safe, read-only, idempotent
-# (the sha256 of storages/dsh_logwiki.json is unchanged across a run — verified)
+# (the sha256 of the instance's storages/<unit>.json is unchanged across a run — verified)
 node scripts/accept-l1.mjs http://127.0.0.1:3080
 
 # Full mode: writes data (edits an entry, regenerates a brief, triggers a backfill)
@@ -140,11 +157,14 @@ node scripts/accept-l1.mjs http://127.0.0.1:3081 --mutate --refresh
 # Offline self-checks (no running instance needed)
 node scripts/verify-extract.mjs       # full replay of real logs + 159 assertions
 node scripts/verify-prompts.mjs       # prompts / JSON tolerance / contract behaviour, 103 assertions
-node scripts/verify-remote.mjs        # remote-source pure logic, 60 assertions
+node scripts/verify-remote.mjs        # remote-source logic, tool schemas, derived paths, per-instance units, privacy gate
 node scripts/verify-zstd-frames.mjs   # multi-frame zstd decoding, 8 assertions
+
+# Migrating a legacy database onto a per-instance unit
+node scripts/migrate-unit.mjs dsh_logwiki_web --dry-run
 ```
 
-Current result: **read-only 44/44 (exit 0)**; offline suites 159/0 · 103/0 · 60/60 · 8/8.
+Current result: **read-only 44/44 (exit 0)**; offline suites 159/0 · 103/0 · 70/70 · 8/8.
 
 > `accept-l1.mjs` only hits HTTP endpoints and therefore **cannot tell whether a button actually does anything**. Click-driven interactions have their own list in section C2 of [`docs/MANUAL-CHECKLIST.md`](docs/MANUAL-CHECKLIST.md).
 
@@ -156,6 +176,7 @@ dsh-logwiki/
 ├─ cordis.patch.yml      in-package patch (used when installing via dsh plugin add)
 ├─ lib/
 │  ├─ index.js           integration: routes / refresh orchestration / SSE / entry CRUD / tool registration / dynamic-import degradation
+│  ├─ paths.js           the only place that derives local paths ($DSH_HOME, profile dirs, npm prefix) — never a hard-coded user name
 │  ├─ extract.js         pure: events → session fingerprint (per-day by event time, tokens, tool histogram, top-level detection)
 │  ├─ fold.js            pure: subagent rollup, day & workspace aggregation, quantile buckets, State/Day payloads
 │  ├─ store.js           the only data file touching ctx: storage KV persistence (debounce + serialisation + degradation)
@@ -166,7 +187,7 @@ dsh-logwiki/
 │  ├─ remote-sources.js  pure: source validation + the "add source" prompt + the logwiki_import_source tool
 │  ├─ vendor/            inlined fzstd (MIT, copied byte-for-byte — see its README)
 │  └─ client.js          client half: hand-written ESM + React.createElement
-└─ scripts/              acceptance and offline self-checks
+└─ scripts/              acceptance and offline self-checks (accept-l1, verify-*, migrate-unit)
 ```
 
 Companion docs: [`docs/OVERVIEW.md`](docs/OVERVIEW.md) (**frozen interface contract** — change it before changing interfaces), [`docs/MANUAL-CHECKLIST.md`](docs/MANUAL-CHECKLIST.md) (acceptance list, measured results, known issues), [`DEVLOG.md`](DEVLOG.md) (per-milestone evidence and post-mortems).

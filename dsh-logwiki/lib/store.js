@@ -1,10 +1,15 @@
 /**
  * dsh-logwiki · 存储层（**唯一接触 ctx 的模块**）
  *
- * 职责：`ctx.storage` KV unit `dsh_logwiki` 的落盘、200ms 防抖、promise 链写串行化、内存降级。
+ * 职责：`ctx.storage` KV unit 的落盘、200ms 防抖、promise 链写串行化、内存降级。
+ *
+ * **unit 名按实例分立**（多实例部署的硬要求）：同一 `$DSH_HOME` 下同时跑
+ * 桌面端（profile `desktop`）与 web 端（profile `web`）时，两边若共用一个 unit，
+ * "整份读 → 改 → 整份写回"会让后写者抹掉先写者的内容。默认 unit 名见
+ * {@link DEFAULT_UNIT_NAME}，派生规则见 {@link unitNameFor}。
  *
  * 契约（docs/OVERVIEW.md §3 `lib/store.js`）：
- *   createStore(ctx) → { ready, get(), update(mutator), flush(), writable, close() }
+ *   createStore(ctx, { unit }) → { ready, get(), update(mutator), flush(), writable, close(), unitName }
  *   storage 不可用 → 纯内存 + writable=false，**不抛**。
  *
  * 只用已验证的 storage API（同 dsh-usage-stats）：
@@ -15,11 +20,58 @@
 
 /** 落盘防抖窗口（ms）。 */
 const WRITE_DEBOUNCE_MS = 200
-/** KV unit 标识（契约 §1）。 */
-const UNIT_NAME = 'dsh_logwiki'
+/**
+ * 默认 KV unit 标识 —— 单实例安装用的历史名字，保持向后兼容。
+ *
+ * ⚠️ 同一 `$DSH_HOME` 下**多实例**同时启用本插件时，不能都落在这个 unit 上：
+ * 落盘是"整份 JSON 读进内存 → 改 → 整份写回"，两个进程各持一份旧快照，
+ * 后写者会把先写者刚写的内容整份抹掉（lost update）。
+ * 所以每个实例用**自己的** unit 名 —— 见 `unitNameFor()`，由 index.js 按实例标识调用。
+ */
+export const DEFAULT_UNIT_NAME = 'dsh_logwiki'
+/**
+ * DSH storage 对 unit 名的硬约束。
+ * 实测自 `@deepseek-ai/dsh-storage` 的 `UNIT_NAME_RE`：`^[a-z][a-z0-9_]*$`
+ * —— **点号、连字符、大写一律非法**（所以不能用 `dsh_logwiki.web` 这种直觉写法），
+ * 违者 `backend.kv.open()` 直接抛错。这里同源声明，好让派生逻辑可以离线自检。
+ */
+export const UNIT_NAME_RE = /^[a-z][a-z0-9_]*$/
+/** 实例后缀长度上限（unit 名总长留足余量）。 */
+const SUFFIX_MAX = 32
 const UNIT_VERSION = 1
 /** 当前数据结构版本（写入 schemaVersion）。 */
 const SCHEMA_VERSION = 1
+
+/**
+ * 把任意实例标识（profile 名、用户自定字符串）清洗成**合法的 unit 后缀**。
+ * 规则：转小写 → 非法字符换下划线 → 去掉开头非字母 → 截断 → 空则返回 ''。
+ * @param {unknown} raw
+ * @returns {string} 合法后缀，或 '' （表示无法派生）
+ */
+export function sanitizeUnitSuffix(raw) {
+  if (typeof raw !== 'string') return ''
+  const cleaned = raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, '_')
+    .replace(/^[^a-z]+/, '')
+    .slice(0, SUFFIX_MAX)
+    .replace(/_+$/, '')
+  return UNIT_NAME_RE.test(`a${cleaned}`) && cleaned !== '' ? cleaned : ''
+}
+
+/**
+ * 由实例标识派生 KV unit 名。空/非法标识一律退回 {@link DEFAULT_UNIT_NAME}，
+ * 绝不返回非法名（否则会打崩 store 初始化为只读）。
+ * @param {unknown} instanceId 例如 profile 名 `web` / `desktop`
+ * @returns {string} 合法 unit 名
+ */
+export function unitNameFor(instanceId) {
+  const suffix = sanitizeUnitSuffix(instanceId)
+  if (suffix === '') return DEFAULT_UNIT_NAME
+  const name = `${DEFAULT_UNIT_NAME}_${suffix}`
+  return UNIT_NAME_RE.test(name) ? name : DEFAULT_UNIT_NAME
+}
 
 const ARRAY_FIELDS = []
 const OBJECT_FIELDS = [
@@ -88,13 +140,30 @@ function snapshotOf(store) {
 
 /**
  * @param {object} ctx Cordis 上下文（只用 `ctx.get('storage')` 与 `ctx.logger`）
+ * @param {{unit?: unknown}} [options] `unit` = 本实例专用的 KV unit 名
+ *        （多实例部署必须各不相同；缺省/非法时退回 {@link DEFAULT_UNIT_NAME}）
  * @returns {{ready: Promise<void>, get(): object, update(mutator: Function): void,
  *            flush(): Promise<void>, writable: boolean, close(): Promise<void>,
- *            loaded: boolean, error: string|null}}
+ *            loaded: boolean, error: string|null, unitName: string}}
  */
-export function createStore(ctx) {
+export function createStore(ctx, options = {}) {
   const store = createEmptyStore()
   const logger = isObj(ctx) && isObj(ctx.logger) ? ctx.logger : undefined
+
+  // unit 名取调用方给的；不合法就退回默认名并在日志里说清楚（**绝不抛** ——
+  // 抛在这里等于整个 store 降级为只读，代价比"名字不理想"大得多）。
+  const requested = isObj(options) ? options.unit : undefined
+  const unitName = typeof requested === 'string' && UNIT_NAME_RE.test(requested) ? requested : DEFAULT_UNIT_NAME
+  if (typeof requested === 'string' && requested !== unitName) {
+    const warnUnsafe = () => {
+      try {
+        logger?.warn?.(`[dsh-logwiki] store: unit 名 ${JSON.stringify(requested)} 不合 DSH 规范（${String(UNIT_NAME_RE)}），已退回 ${unitName}`)
+      } catch {
+        /* 日志不可用不影响数据路径 */
+      }
+    }
+    warnUnsafe()
+  }
 
   let unit = null
   let writable = false
@@ -148,7 +217,7 @@ export function createStore(ctx) {
         return
       }
       const opened = await backend.kv.open({
-        name: UNIT_NAME,
+        name: unitName,
         version: UNIT_VERSION,
         tables: [],
         hasGlobal: true,
@@ -287,6 +356,10 @@ export function createStore(ctx) {
     },
     get error() {
       return initError
+    },
+    /** 本实例实际使用的 KV unit 名（对外可核对"分库有没有真的生效"）。 */
+    get unitName() {
+      return unitName
     },
   }
 }

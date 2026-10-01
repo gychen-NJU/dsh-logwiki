@@ -12,13 +12,19 @@
  */
 
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import assert from 'node:assert/strict'
+import { fileURLToPath } from 'node:url'
 
 import * as R from '../lib/remote.js'
 import * as RS from '../lib/remote-sources.js'
 import * as EX from '../lib/extract.js'
 import { apply, parameterSchemaProblem, schemaFingerprint } from '../lib/index.js'
+import { dshHome, sessionsRoot, vendorRoots } from '../lib/paths.js'
+
+/** 本仓库的 dsh-logwiki 包根（隐私门要扫 lib/ 与 scripts/）。 */
+const ROOT_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 
 const results = []
 const pending = []
@@ -207,7 +213,7 @@ check('maxBytes 上限生效（不会因为一个超大文件就全拉）', () =
 })
 
 console.log('\n--- G. 端到端：真实日志 → 指纹 ---')
-const ROOT = 'C:/Users/13676/.dsh/sessions'
+const ROOT = sessionsRoot()
 function pickRealLog() {
   if (!fs.existsSync(ROOT)) return undefined
   let best
@@ -491,6 +497,111 @@ check('execute 对非法输入抛错（不会写脏数据）', async () => {
   }
   assert.equal(threw, true, '本应抛错')
   assert.equal(saved.length, 0, '抛错时不应写入')
+})
+
+console.log('\n--- K. 路径派生（公开仓库不许出现本机用户名/盘符） ---')
+check('路径只由 $DSH_HOME / 惯例目录派生，且不依赖具体用户名', () => {
+  const saved = process.env.DSH_HOME
+  try {
+    process.env.DSH_HOME = path.join(os.tmpdir(), 'dsh-home-for-test')
+    assert.equal(dshHome(), process.env.DSH_HOME)
+    assert.equal(sessionsRoot(), path.join(process.env.DSH_HOME, 'sessions'))
+    // 纯空白视为未设（与 dsh 本体口径一致）
+    process.env.DSH_HOME = '   '
+    assert.notEqual(dshHome(), process.env.DSH_HOME)
+    assert.ok(dshHome().length > 0)
+  } finally {
+    if (saved === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = saved
+  }
+  // 未设时退回 ~/.dsh
+  delete process.env.DSH_HOME
+  assert.equal(dshHome(), path.join(os.homedir(), '.dsh'))
+})
+check('vendorRoots() 只返回真实存在的目录，且顺序稳定', () => {
+  const a = vendorRoots()
+  const b = vendorRoots()
+  assert.deepEqual(a, b)
+  for (const root of a) assert.equal(fs.existsSync(root), true, `返回了不存在的根：${root}`)
+  assert.ok(a.length > 0, '本机应至少命中一个解析根')
+})
+check('隐私门：lib/ 与 scripts/ 里不得出现真实的家目录用户名', () => {
+  const offenders = []
+  const dirs = [path.join(ROOT_DIR, 'lib'), path.join(ROOT_DIR, 'scripts')]
+  /**
+   * 只抓「家目录 + 一个**具体**用户名」这一种形态：
+   *   `C:/Users/<name>`、`/Users/<name>`、`/home/<name>`
+   * 允许名单里放的是**占位符**与测试用短名 —— 它们不是任何人的真实账号。
+   * 这样既不误伤 `/home/u/.dsh`（测试数据）、`/home/../etc`（路径穿越用例），
+   * 又能抓住 `/home/<真实账号>/.dsh` 这类**远端路径泄漏**。
+   */
+  const HOME_PATH_RE = /(?:C:[\\/]Users[\\/]|\/Users\/|\/home\/)([A-Za-z0-9._-]+)/g
+  const PLACEHOLDERS = new Set(['u', 'user', 'me', 'you', 'someone', 'root', 'username', 'name', '..', '.'])
+  for (const dir of dirs) {
+    for (const file of fs.readdirSync(dir)) {
+      if (!/\.(mjs|js)$/.test(file)) continue
+      const lines = fs.readFileSync(path.join(dir, file), 'utf8').split('\n')
+      lines.forEach((line, i) => {
+        for (const match of line.matchAll(HOME_PATH_RE)) {
+          const who = match[1]
+          if (PLACEHOLDERS.has(who)) continue
+          if (/^[a-z]{1,2}$/.test(who)) continue // 单/双字母是测试用短名
+          offenders.push(`${file}:${i + 1} → ${match[0]}${who}`)
+        }
+      })
+    }
+  }
+  assert.deepEqual(offenders, [], `命中真实用户名路径：${offenders.join(' | ')}`)
+})
+
+check('打包门：lib/ 下每个文件都列进 package.json 的 files', () => {
+  // `files` 是逐个文件白名单 —— 新增一个 lib 模块却忘了登记，本地一切正常、
+  // 发布出去却缺文件（本次新增 lib/paths.js 就差点漏掉）。格式差异在这里一次性挡掉。
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'package.json'), 'utf8'))
+  const listed = new Set(pkg.files ?? [])
+  const missing = fs
+    .readdirSync(path.join(ROOT_DIR, 'lib'))
+    .filter((f) => f.endsWith('.js') || f.endsWith('.mjs'))
+    .map((f) => `lib/${f}`)
+    .filter((rel) => !listed.has(rel))
+  assert.deepEqual(missing, [], `未登记进 package.json files：${missing.join(', ')}`)
+})
+
+console.log('\n--- L. 实例分库（多实例各写各的 unit） ---')
+check('unit 名派生：合法、稳定、能区分实例', async () => {
+  const { unitNameFor, sanitizeUnitSuffix, DEFAULT_UNIT_NAME, UNIT_NAME_RE } = await import('../lib/store.js')
+  // 无标识 → 保持历史默认名（向后兼容）
+  assert.equal(unitNameFor(''), DEFAULT_UNIT_NAME)
+  assert.equal(unitNameFor(undefined), DEFAULT_UNIT_NAME)
+  assert.equal(DEFAULT_UNIT_NAME, 'dsh_logwiki')
+  // 两个实例必须落到不同 unit
+  assert.equal(unitNameFor('web'), 'dsh_logwiki_web')
+  assert.equal(unitNameFor('desktop'), 'dsh_logwiki_desktop')
+  assert.notEqual(unitNameFor('web'), unitNameFor('desktop'))
+  // DSH 的硬约束：^[a-z][a-z0-9_]*$ —— 点号/连字符/大写都非法，必须被清洗掉
+  assert.equal(sanitizeUnitSuffix('open-design'), 'open_design')
+  assert.equal(unitNameFor('open-design'), 'dsh_logwiki_open_design')
+  assert.equal(unitNameFor('WEB'), 'dsh_logwiki_web')
+  assert.equal(unitNameFor('web.prod'), 'dsh_logwiki_web_prod')
+  // 各种脏输入都必须产出**合法**名字（否则 store 初始化会失败）
+  for (const nasty of ['', '  ', '9', '9x', '!!!', '-', 'a'.repeat(80), '中文', 'a/b\\c', 'x'.repeat(200)]) {
+    const name = unitNameFor(nasty)
+    assert.match(name, UNIT_NAME_RE, `脏输入 ${JSON.stringify(nasty)} 产出非法 unit 名：${name}`)
+  }
+  // 长度受限
+  assert.ok(unitNameFor('a'.repeat(200)).length <= 48)
+})
+check('createStore 接受合法 unit、拒绝非法 unit（退回默认名而不是抛错）', async () => {
+  const { createStore, DEFAULT_UNIT_NAME } = await import('../lib/store.js')
+  // ctx 故意不可用 → 走"纯内存降级"分支，但仍能读到 unitName
+  const ctx = { get: () => undefined, logger: undefined }
+  const okStore = createStore(ctx, { unit: 'dsh_logwiki_web' })
+  assert.equal(okStore.unitName, 'dsh_logwiki_web')
+  const badStore = createStore(ctx, { unit: 'dsh_logwiki.web' }) // 点号非法
+  assert.equal(badStore.unitName, DEFAULT_UNIT_NAME)
+  const noOptStore = createStore(ctx)
+  assert.equal(noOptStore.unitName, DEFAULT_UNIT_NAME)
+  await Promise.all([okStore.ready, badStore.ready, noOptStore.ready])
 })
 
 await Promise.all(pending)

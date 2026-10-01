@@ -108,6 +108,7 @@ git clone https://github.com/gychen-NJU/dsh-logwiki.git
 | `heatmap.metric` | `turns` | 默认指标 |
 | `heatmap.includeSubagents` | true | 子代理工作量是否计入热力图 |
 | `ui.language` / `weekStart` | `zh` / `1` | 语言 / 周一起始 |
+| `store.unit` | *（空 = 自动）* | 存储单元名。留空则**按实例自动派生** `dsh_logwiki_<profile>`（见[数据存放](#数据存放)）。只有要固定名字、或把老库挂到某实例上时才需要显式填。 |
 | `remote.enable` | false | 远程来源总开关：开了之后「更新」会顺带同步所有已启用的远程来源（单独点「同步」不受它限制） |
 | `remote.maxFilesPerSync` | 400 | 单次同步最多拉多少个文件 |
 | `remote.maxBytesPerFile` | 67108864 | 单文件上限（按 base64 **编码后**的体积算，别按原始大小设小） |
@@ -117,9 +118,25 @@ git clone https://github.com/gychen-NJU/dsh-logwiki.git
 
 ## 数据存放
 
-- 结构化数据经 `ctx.storage` 落到 **`$DSH_HOME/storages/dsh_logwiki.json`**：条目、简报、来源、同步账本、会话指纹。
-- **不要手改**这个文件——它是插件唯一的持久化载体。
-- ⚠️ 该文件**被同 `$DSH_HOME` 的所有实例共享**。**同一时刻只应有一个实例启用本插件**，否则并发写。
+- 结构化数据经 `ctx.storage` 落到 **`$DSH_HOME/storages/<unit>.json`**：条目、简报、来源、同步账本、会话指纹。
+- **单元名是「一实例一个」的**。默认 `store.unit` 留空时，插件按当前 profile 派生 `dsh_logwiki_<profile>` —— `dsh_logwiki_web`、`dsh_logwiki_desktop`…… 完全拿不到 profile 信息时，退回历史的 `dsh_logwiki`。
+- **为什么必须分开。** 同一个 `$DSH_HOME` 上跑两个实例是常态（桌面端 + 一个 `dsh web`，或两个 `dsh web` profile）。共用一个单元是不安全的：落盘是**整份文档重写**，两个进程各自持有一份内存快照，**后写的那个会把先写的整份抹掉**（典型的 lost update）。一实例一单元从根上消除这类故障——不需要加锁、不需要合并、也不需要谁记得"只能开一个"。
+- **单元名必须匹配 `^[a-z][a-z0-9_]*$`**（DSH 自己的约束），所以**不能用点号和连字符**。这就是分隔符用 `_`（`dsh_logwiki_web`）而不是 `.` 的原因——`dsh_logwiki.web` 会被直接拒绝。
+- **不要手改**这个文件——它是插件唯一的持久化载体，文件头里的 `unit.name` 在打开时会被校验。
+- **怎么确认当前用的是哪个单元？** `GET /api/dsh-logwiki/ping`（以及 `/health`）里的 `store.unit` 会如实回报。别猜。
+
+### 迁移老数据
+
+旧版本一直用不带后缀的 `dsh_logwiki` 单元，所以升级后每个实例都会从空库开始，直到你把老库复制过去。用自带脚本：
+
+```powershell
+node scripts/migrate-unit.mjs dsh_logwiki_web       # 老库 → web 实例
+node scripts/migrate-unit.mjs dsh_logwiki_desktop   # 老库 → 桌面端实例
+```
+
+- 脚本会**连文件头一起改写**。只改文件名是**不行**的：存储层打开时会校验 `unit.name`，不一致直接抛 `missing or foreign unit header`。
+- **源文件永不被改动**；目标已存在时默认不覆盖（要覆盖得显式加 `--force`）；`--dry-run` 只报告不写。每个实例跑一次，然后重启该实例。
+- 退出码非 0 表示什么都没写。
 
 ## 验证
 
@@ -127,7 +144,7 @@ git clone https://github.com/gychen-NJU/dsh-logwiki.git
 cd <repo>/dsh-logwiki
 
 # 对**生产实例**：安全、只读、幂等
-# （跑前后 storages/dsh_logwiki.json 的 sha256 不变，已实证）
+# （跑前后该实例的 storages/<unit>.json 的 sha256 不变，已实证）
 node scripts/accept-l1.mjs http://127.0.0.1:3080
 
 # 完整模式：会写数据（改条目、重生成简报、触发回填）——仅限专用测试实例
@@ -136,11 +153,14 @@ node scripts/accept-l1.mjs http://127.0.0.1:3081 --mutate --refresh
 # 纯离线自检（不需要运行中的实例）
 node scripts/verify-extract.mjs       # 真实日志全量重放 + 159 断言
 node scripts/verify-prompts.mjs       # 提示词 / JSON 容错 / 契约行为 103 断言
-node scripts/verify-remote.mjs        # 远程来源纯逻辑层 60 断言
+node scripts/verify-remote.mjs        # 远程来源逻辑、工具 schema、路径派生、按实例分库、隐私门
 node scripts/verify-zstd-frames.mjs   # 多重 zstd frame 解码 8 断言
+
+# 把老库迁到按实例分立的单元上
+node scripts/migrate-unit.mjs dsh_logwiki_web --dry-run
 ```
 
-当前结果：**只读 44/44（exit=0）**；离线四套件 159/0 · 103/0 · 60/60 · 8/8。
+当前结果：**只读 44/44（exit=0）**；离线四套件 159/0 · 103/0 · 70/70 · 8/8。
 
 > `accept-l1.mjs` 只打 HTTP 端点，**测不到"按钮点了有没有反应"**。点击类交互另见 [`docs/MANUAL-CHECKLIST.md`](docs/MANUAL-CHECKLIST.md) 的 C2 节清单。
 
@@ -152,6 +172,7 @@ dsh-logwiki/
 ├─ cordis.patch.yml      包内 patch（用 dsh plugin add 安装时用）
 ├─ lib/
 │  ├─ index.js           集成层：路由 / 刷新编排 / SSE / 条目 CRUD / 工具注册 / 动态 import 降级
+│  ├─ paths.js           唯一派生本机路径的地方（$DSH_HOME、profile 目录、npm 前缀）——绝不写死用户名
 │  ├─ extract.js         纯函数：事件 → 会话指纹（按事件时间归日、token、工具直方图、顶层判定）
 │  ├─ fold.js            纯函数：子代理归并、天/工作区聚合、分位分档、State/Day payload
 │  ├─ store.js           唯一接触 ctx 的数据文件：storage KV 落盘（防抖 + 串行化 + 降级）
@@ -162,7 +183,7 @@ dsh-logwiki/
 │  ├─ remote-sources.js  纯函数：来源定义校验 + 「添加来源」提示词 + logwiki_import_source 工具
 │  ├─ vendor/            内联 fzstd（MIT，逐字节复制，见其 README）
 │  └─ client.js          客户端半边：手写 ESM + React.createElement
-└─ scripts/              验收与离线自检
+└─ scripts/              验收与离线自检（accept-l1、verify-*、migrate-unit）
 ```
 
 配套文档：[`docs/OVERVIEW.md`](docs/OVERVIEW.md)（**冻结接口契约**，改接口先改它）、[`docs/MANUAL-CHECKLIST.md`](docs/MANUAL-CHECKLIST.md)（验收清单、实测结果、已知问题）、[`DEVLOG.md`](DEVLOG.md)（逐里程碑证据与踩坑记录）。

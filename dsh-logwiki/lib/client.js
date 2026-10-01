@@ -1001,7 +1001,7 @@ select.lw-field { cursor: pointer; }
           field('名称', label, setLabel, '短名称，例如 rocs'),
           field('SSH 别名（WSL ~/.ssh/config）', alias, setAlias, '例如 rocs', true),
           field('WSL 发行版（留空用默认）', distro, setDistro, '例如 Ubuntu'),
-          field('远端 DSH_HOME（绝对路径）', dshHome, setDshHome, '例如 /home/gychen/.dsh'),
+          field('远端 DSH_HOME（绝对路径）', dshHome, setDshHome, '例如 /home/<用户名>/.dsh'),
           field('回填天数', days, setDays, '90'),
           missing.length > 0
             ? h(

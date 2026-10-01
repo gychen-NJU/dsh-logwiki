@@ -20,6 +20,8 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
+import { findInNodeModules, sessionsRoot } from '../lib/paths.js'
+
 import {
   dayKey,
   extractSession,
@@ -39,8 +41,10 @@ import {
 
 // ---------------------------------------------------------------- 测试设施
 
-const FZSTD_URL = 'file:///C:/Users/13676/.dsh/profiles/web/node_modules/fzstd/lib/index.js'
-const SESSIONS_ROOT = 'C:\\Users\\13676\\.dsh\\sessions'
+// 路径全部派生（$DSH_HOME → 惯例目录），**不写死用户名/盘符** —— 见 lib/paths.js
+const FZSTD_PATH = findInNodeModules('fzstd', 'lib', 'index.js')
+const FZSTD_URL = FZSTD_PATH === null ? null : pathToFileURL(FZSTD_PATH).href
+const SESSIONS_ROOT = sessionsRoot()
 const TZ = 480
 
 let passed = 0
@@ -279,6 +283,12 @@ eq('daySessionFingerprint: 空 → 稳定串', daySessionFingerprint({}), daySes
 
 head('2. 真实会话日志全量重放')
 
+if (FZSTD_URL === null) {
+  console.error('fzstd 不可用（在候选 node_modules 根里都没找到）→ 无法解压真实日志。')
+  console.error('提示：这是 dev-only 依赖，装在任一 profile 的 node_modules 下即可；')
+  console.error('      非标准布局可用环境变量 DSH_LOGWIKI_VENDOR_ROOTS 指定解析根。')
+  process.exit(2)
+}
 const fzstd = await import(FZSTD_URL)
 const decompress = fzstd.decompress ?? fzstd.default?.decompress
 if (typeof decompress !== 'function') {

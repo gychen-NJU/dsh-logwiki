@@ -30,6 +30,7 @@
     "lib/extract.js",
     "lib/fold.js",
     "lib/store.js",
+    "lib/paths.js",
     "lib/summarize.js",
     "lib/prompts.js",
     "lib/vendor-dsh.js",

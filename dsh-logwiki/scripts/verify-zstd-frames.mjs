@@ -15,6 +15,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import zlib from 'node:zlib'
 import { decompress } from '../lib/vendor/fzstd.mjs'
+import { sessionsRoot } from '../lib/paths.js'
 
 const results = []
 function record(name, ok, evidence = '') {
@@ -22,7 +23,7 @@ function record(name, ok, evidence = '') {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${evidence ? `  — ${evidence}` : ''}`)
 }
 
-const ROOT = 'C:/Users/13676/.dsh/sessions'
+const ROOT = sessionsRoot()
 
 function listSessionFiles() {
   const out = []

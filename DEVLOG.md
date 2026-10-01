@@ -636,3 +636,63 @@ Web 3080 重启后，`/api/dsh-logwiki/health` 返回正常并列出两个工具
 
 - **桌面端 19387**：**有意重启**（旧进程持有修复前的定义，不重启不可能通过验收）。原验收清单 E1 记的红线是"全程未重启/kill 19387"，那是针对 L1/L2 验收期间的**保护性约定**，与本次"修复必须让桌面端加载新代码"是两件事，已在 `docs/MANUAL-CHECKLIST.md` 里更正口径。
 - **web 3080**：**未重启**。它启动于 21:31（晚于 21:07 的修复），已持有修复后的 schema；只是还没有本段的"自检门 + 指纹"两个护栏，属可接受的临时状态，下次重启自然带上。
+
+---
+
+## 去私有化 + 按实例分库（2026-10-01 晚）
+
+### 起因
+
+用户提两件事：① 公开仓库里硬编码了 `C:/Users/<用户名>`，改成 `DSH_HOME` / `os.homedir()` 派生；② 按实例分库解决"桌面端 + web 端共用一份 KV"的冲突，并在 README 说清楚。
+
+### ① 路径全部派生（新增 `lib/paths.js`）
+
+新增 `lib/paths.js` 作为**唯一**允许触碰家目录 / DSH 主目录 / npm 前缀的文件，全部**派生**：
+`$DSH_HOME`（纯空白视为未设）→ `~/.dsh`；vendor 解析根覆盖三种安装形态 ——
+profile 层 junction、各 profile 自己的 `node_modules`、桌面端 Electron 运行时（`process.resourcesPath/app.asar/dsh/node_modules`）、npm 全局前缀（`npm_config_prefix` / `%APPDATA%\npm` / 由 `process.execPath` 反推 / POSIX 惯例）。
+非标准布局可用 `DSH_LOGWIKI_VENDOR_ROOTS` 覆盖。
+
+改动文件：`lib/vendor-dsh.js`（`REQUIRE_ROOTS` 改为 `vendorRoots()` 派生 + 文档里的示例路径去名）、
+`scripts/verify-extract.mjs`（fzstd 与 sessions 根）、`scripts/verify-remote.mjs`、`scripts/verify-zstd-frames.mjs`。
+
+**顺手抓到一个用户没点名的真实泄漏**：`lib/client.js` 的"远端 DSH_HOME"输入框占位符写的是
+`例如 /home/<真实账号>/.dsh` —— 正是 `.gitignore` 里已经声明的隐私项（远端 DSH_HOME 路径）。
+之所以能被抓到，是因为新加的**隐私门**断言会扫 `lib/` 与 `scripts/`：
+`^[a-z]{1,2}$` 与占位符名单（`u`/`user`/`me`/…）之外的 `/home/<name>`、`/Users/<name>`、`C:/Users/<name>` 一律 FAIL。
+已改为 `/home/<用户名>/.dsh`。
+
+### ② 按实例分库（`store.unit`）
+
+- `store.js`：unit 名从常量改为派生 —— `unitNameFor(profileName)` → `dsh_logwiki_<profile>`；
+  受 DSH 硬约束 `UNIT_NAME_RE = /^[a-z][a-z0-9_]*$/`（**点号/连字符非法**，所以不能用 `dsh_logwiki.web` 这种直觉写法），
+  清洗规则：转小写 → 非法字符换 `_` → 去开头非字母 → 截断 → 空则退回默认名。脏输入**绝不抛**（抛了等于 store 降级只读）。
+- `index.js`：`config.store.unit`（显式）→ `profileContext.name` 自动派生 → 默认 `dsh_logwiki`；
+  实际生效的 unit 出现在 `/ping`、`/health` 的 `store.unit`，**可远程核对**，也写进启动日志
+  （`store unit = dsh_logwiki_desktop（来源：profile 'desktop'）`）。
+- 新增 `scripts/migrate-unit.mjs`：老库 → 新 unit 的迁移。⚠️ **不能只改文件名** ——
+  DSH 的 `dsh-storage-json` 在 `parse()` 里校验 `unit.name === descriptor.name`，不一致直接抛
+  `missing or foreign unit header`，所以脚本连文件头一起改写。源文件永不动、默认不覆盖、支持 `--dry-run`。
+
+### 怎么验的
+
+| # | 项 | 证据 |
+|---|---|---|
+| 1 | 离线四套件 | `verify-remote` **70/70**（61 → 64 → 69 → 70，新增路径派生/隐私门/打包门/unit 派生/非法 unit 退回）；`verify-extract` 159/0；`verify-prompts` 103/0；`verify-zstd-frames` 8/8；`node --check` 全绿 |
+| 2 | 隐私门有判别力 | 它在修复前对 `client.js:1004` **报红**（`/home/<真实账号>/.dsh`），改后转绿 —— 不是恒真式 |
+| 3 | 桌面端自动分库 | 重启后启动日志 `store unit = dsh_logwiki_desktop（来源：profile 'desktop'）`；`GET /ping` → `store.unit=dsh_logwiki_desktop`（`config.store.unit` 仍为空 = 自动） |
+| 4 | **桌面端确实读的是新库**（决定性判据） | 给新库的 `sources.local.label` 打探针 `本机·UNIT-PROBE` → 重启桌面端 → `/state` 返回该探针值，而老库里仍是 `本机`。**两个文件内容一致时，"读到了哪份"无法靠数据本身区分，必须让它们不同** —— 这一步就是为了消除这个盲区。验证后已还原（备份 → 停进程 → 还原 → 重启，避免内存里的探针值被回写覆盖还原结果），现 `sources` 为 `["本机","rocs"]` |
+| 5 | 数据完整 | 迁移后桌面端 `/state`：**81 会话 / 75 条目 / 1858 回合 / 17 个活跃日 / 2 个来源**，与迁移前一致 |
+| 6 | 老库不再被桌面端写 | `storages/dsh_logwiki.json` 的 mtime 全程停在 `20:10:35`（多次重启桌面端之后仍未变） |
+| 7 | 桌面端验收套件 | `accept-l1.mjs http://127.0.0.1:19387` → **45/45，exit=0** |
+| 8 | 客户端半边未坏 | 浏览器打开 19387 → 任务日历面板正常（17 个活跃日）；"+ 添加来源"对话框占位符已是 `例如 /home/<用户名>/.dsh`，页面文本内**无**真实用户名、无 `Invalid schema` |
+
+### web 3080 的处理（零停机）
+
+web 的历史数据就在**无后缀的 `dsh_logwiki`** 里。若放任自动派生生效，它**下次重启会打开一个空库、看起来像数据丢了**。
+所以在其 profile 里显式钉住老名字（`profiles/web/cordis.patch.yml` 的 `store: { unit: dsh_logwiki }`），
+**行为与现状完全一致、无需重启、数据零风险**；新装的实例则自动拿到 `dsh_logwiki_<profile>`。
+想统一成 `dsh_logwiki_web` 的路径已写进该配置的注释与 README（先 `migrate-unit`，再改值，然后重启）。
+配置改动已用 `dsh --profile web --dump-config` 验证能正常合成（exit 0，`- id: logwiki` 下出现 `store.unit: dsh_logwiki`）。
+
+> 现状：**桌面端 `dsh_logwiki_desktop` / web `dsh_logwiki`，两个实例各写各的文件，冲突已消除。**
+> 截图 `dev/_desktop-19387-per-instance-unit.png` 只存本地（已打码；原始那张"添加来源"展开图**含 WSL 里其它服务器别名，已删除**）。

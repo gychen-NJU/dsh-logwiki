@@ -16,6 +16,7 @@
 | 摘要 | `lib/summarize.js` | 线 B 独占 | `ctx.llm.stream` 封装：条目摘要 + 简报 |
 | 提示词 | `lib/prompts.js` | 线 B 独占 | 中文提示词构造 + JSON 容错解析 |
 | 依赖解析 | `lib/vendor-dsh.js` | 线 B 独占 | **唯一**允许 import `@deepseek-ai/*` 的文件 |
+| 路径派生 | `lib/paths.js` | 集成方独占 | **唯一**允许触碰家目录/DSH 主目录/npm 前缀的文件；全部派生，不许写死用户名 |
 | 界面 | `lib/client.js` | 线 C 独占 | 手写 ESM + React.createElement 全部 UI |
 
 **纯函数约束**：`extract.js` / `fold.js` / `prompts.js` 不得接触 `ctx`、网络、时钟以外的副作用；必须能在 `node scripts/verify-extract.mjs` 里直接调用。
@@ -237,7 +238,11 @@ export function daySessionFingerprint(sessionsOfDay)
 
 ### `lib/store.js`
 ```js
-export function createStore(ctx)   // 返回 ↓；storage 不可用时降级为纯内存并置 writable=false
+/**
+ * @param options.unit 本实例专用的 KV unit 名（**多实例部署必须各不相同**）。
+ *   缺省/非法 → `dsh_logwiki`。名字受 DSH 约束 `^[a-z][a-z0-9_]*$`（**不许点号/连字符**）。
+ */
+export function createStore(ctx, options = {})   // 返回 ↓；storage 不可用时降级为纯内存并置 writable=false
 {
   ready: Promise<void>,            // 首次 loadAll 完成
   get(): StoreObject,              // 内存快照（勿直接改写深层对象）
@@ -245,11 +250,38 @@ export function createStore(ctx)   // 返回 ↓；storage 不可用时降级为
   flush(): Promise<void>,          // 立即落盘（测试/退出用）
   writable: boolean,
   close(): Promise<void>,
+  unitName: string,                // 实际生效的 unit 名（供 /ping、/health 对外核对）
 }
 
 /** 空 store 快照（测试/无 storage 时用）。线 A 补的导出。 */
 export function createEmptyStore()
+
+/** unit 名派生：`unitNameFor('web') === 'dsh_logwiki_web'`；脏输入一律退回默认名。线 A 补的导出。 */
+export function unitNameFor(instanceId)
+export function sanitizeUnitSuffix(raw)
+export const DEFAULT_UNIT_NAME = 'dsh_logwiki'
+export const UNIT_NAME_RE = /^[a-z][a-z0-9_]*$/
 ```
+
+> **为什么按实例分 unit**：同一 `$DSH_HOME` 下两个实例（桌面端 + web）共用一个 unit 时，
+> 落盘是"整份文档重写"，两进程各持内存快照 → 后写者抹掉先写者（lost update）。
+> unit 名由 `index.js` 按 `profileContext.name` 派生，`config.store.unit` 可显式覆盖。
+
+### `lib/paths.js`
+```js
+export function dshHome()        // $DSH_HOME（纯空白视为未设）→ ~/.dsh
+export function sessionsRoot()   // $DSH_HOME/sessions
+export function profilesRoot()   // $DSH_HOME/profiles
+export function profileDirs()    // profiles 下全部 profile 目录（排序）
+export function vendorRoots()    // 可能装着 @deepseek-ai/* 的 node_modules 根（存在性已过滤，按优先级）
+export function npmGlobalPrefixes()
+export function findInNodeModules(pkg, ...rest)   // 命中返回绝对路径，否则 null
+```
+
+> **公开仓库红线**：这是**唯一**允许触碰家目录 / DSH 主目录 / npm 全局前缀的文件，
+> 而且一律**派生**（`$DSH_HOME` → 各平台惯例目录），**不得写死任何用户名或盘符**。
+> `verify-remote.mjs` 的「隐私门」断言会扫 `lib/` 与 `scripts/`，发现真实用户名路径即 FAIL。
+> 非标准布局用环境变量 `DSH_LOGWIKI_VENDOR_ROOTS`（`path.delimiter` 分隔）覆盖。
 
 ### `lib/summarize.js`
 ```js

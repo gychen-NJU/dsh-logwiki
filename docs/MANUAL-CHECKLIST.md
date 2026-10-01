@@ -43,6 +43,7 @@ cd dsh-logwiki
 node --check lib/index.js; node --check lib/client.js
 node --check lib/extract.js; node --check lib/fold.js; node --check lib/store.js
 node --check lib/summarize.js; node --check lib/prompts.js; node --check lib/vendor-dsh.js
+node --check lib/paths.js; node --check lib/store.js; node --check lib/client.js
 node scripts/verify-extract.mjs      # 线 A 的真数据提取自检
 node scripts/verify-prompts.mjs      # 线 B 的提示词/解析/契约自检
 ```
