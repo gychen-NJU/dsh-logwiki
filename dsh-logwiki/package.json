@@ -1,0 +1,62 @@
+{
+  "name": "dsh-logwiki",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH 任务日历 + Wiki：热力图/日历、按来源与工作区的任务卡片、周月简报、多来源（本地 + 远程 DSH）",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/extract.js",
+    "lib/fold.js",
+    "lib/store.js",
+    "lib/summarize.js",
+    "lib/prompts.js",
+    "lib/vendor-dsh.js",
+    "lib/remote.js",
+    "lib/remote-sources.js",
+    "lib/vendor/fzstd.mjs",
+    "lib/vendor/fzstd.LICENSE.txt",
+    "lib/vendor/README.md",
+    "cordis.patch.yml",
+    "package.json"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gychen-NJU/dsh-logwiki.git"
+  },
+  "homepage": "https://github.com/gychen-NJU/dsh-logwiki#readme",
+  "bugs": {
+    "url": "https://github.com/gychen-NJU/dsh-logwiki/issues"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "plugin",
+    "calendar",
+    "heatmap",
+    "wiki",
+    "sessions"
+  ],
+  "license": "MIT"
+}

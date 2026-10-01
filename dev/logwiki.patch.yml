@@ -1,0 +1,36 @@
+# L1 开发覆盖层（由启动器的 --patch 引入，**不写入** profiles/web/cordis.patch.yml）。
+#
+#   dsh --profile web --patch E:\GalaxyC\DSH\DSH-LogWiki\dev\logwiki.patch.yml --port 3082 --no-open
+#
+# 这样桌面端(19387)与你日常的 web 端(3080)完全不受影响：共享 profile 保持原样，
+# 插件只挂在自管的实例上，可以随便重启。
+#
+# name 用绝对 file:/// 路径 → Node ESM 直接 import，不依赖 profile 的 node_modules。
+# 客户端半边由最近的祖先 package.json（dsh-logwiki/package.json）里的 dsh.client 发现。
+#
+# 注意：patch 的 config 是**整体替换、不深合并**，改任何一项都要把整块写全。
+- insert:
+    - id: logwiki
+      name: 'file:///E:/GalaxyC/DSH/DSH-LogWiki/dsh-logwiki/lib/index.js'
+      config:
+        scan:
+          sinceDays: 365
+          maxSessions: 2000
+          maxNewPerRun: 300
+        summarize:
+          provider: deepseek-official
+          model: deepseek-flash
+          maxTokens: 8192
+          timeoutMs: 60000
+          maxConcurrency: 2
+          onlyTopLevelSessions: true
+        heatmap:
+          metric: turns
+          includeSubagents: true
+        ui:
+          language: zh
+          weekStart: 1
+        remote:
+          enable: false
+          sinceDays: 90
+          maxBytesPerSync: 33554432

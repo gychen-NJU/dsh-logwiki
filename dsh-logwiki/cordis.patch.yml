@@ -1,0 +1,35 @@
+# dsh-logwiki bundle patch：把双半边插件行插进任意 web profile。
+#
+#   node 半边   = 本包默认导出（lib/index.js）——提供 /api/dsh-logwiki/* 路由与
+#                 logwiki_write_digest 工具；
+#   浏览器半边 = package.json 里 dsh.client{platform:"web"} 标记 + exports["./client"]
+#                 被 dsh-client-modules 扫描到（lib/client.js）——注册左侧栏图标行
+#                 `sidebar.panellist` 与整页日历 `main`(key=logwiki)。
+#
+# 行 id 保持 `logwiki` 不变；config 的每个字段都会被整体替换（patch 不深合并），
+# 所以覆盖时要把需要的字段一并写全。
+- insert:
+    - id: logwiki
+      name: dsh-logwiki
+      config:
+        scan:
+          sinceDays: 365
+          maxSessions: 2000
+          maxNewPerRun: 300
+        summarize:
+          provider: deepseek-official
+          model: deepseek-flash
+          maxTokens: 8192
+          timeoutMs: 60000
+          maxConcurrency: 2
+          onlyTopLevelSessions: true
+        heatmap:
+          metric: turns
+          includeSubagents: true
+        ui:
+          language: zh
+          weekStart: 1
+        remote:
+          enable: false
+          sinceDays: 90
+          maxBytesPerSync: 33554432

@@ -1,0 +1,34 @@
+# ── 私有 / 含密钥，绝不入库 ──────────────────────────────────────────────
+# meow-memory 的记忆数据库（私有数据）
+.dsh-meow/
+
+# 运行时日志：3080.out.log 里含**带 token 的访问 URL**
+dev/*.log
+dev/*.out
+dev/*.err
+
+# ── 构建 / 测试产物 ─────────────────────────────────────────────────────
+# verify-extract.mjs 的输出转储
+dsh-logwiki/_baseline.txt
+
+# 临时脚本与临时图（dev/ 只保留 logwiki.patch.yml 这一份可发布的覆盖层）
+dev/_*
+
+# ── 不随仓库发布的截图 ──────────────────────────────────────────────────
+# c-0*.png 是用 CDP 注入 **mock 数据**渲染的，验收清单里已声明"不算真实证据"。
+# 放进公开仓库会误导读者，故排除（文件仍留在本地）。
+docs/screenshots/c-0*.png
+
+# 「添加来源」对话框截图：会暴露本机 WSL 里配置的**其他服务器别名**
+# （cgyhpc / lyhhpc / olivia …）以及远端 DSH_HOME 路径，不适合公开。
+# 文件留在本地，需要时再单独决定怎么打码后发布。
+docs/screenshots/v2-add-source-dialog.png
+docs/screenshots/v2-source-registered.png
+
+# ── 常规 ────────────────────────────────────────────────────────────────
+node_modules/
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
+*.swp
