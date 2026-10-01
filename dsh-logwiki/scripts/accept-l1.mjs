@@ -162,7 +162,17 @@ async function main() {
     record(`/day?date=${busiest.date} 可达`, day.status === 200 && day.json?.ok === true, `HTTP ${day.status}`)
     record('日详情有工作区卡', workspaces.length > 0, `工作区: ${workspaces.map((w) => w.workspaceLabel).slice(0, 5).join(' / ')}`)
     record('日详情有条目卡', entries.length > 0, `条目 ${entries.length} 条，例: ${String(entries[0]?.summary ?? '').slice(0, 40)}`)
-    record('条目按时间升序', entries.every((e, i) => i === 0 || (entries[i - 1].startTime ?? 0) <= (e.startTime ?? 0)), `${entries.length} 条已检查`)
+    // ⚠️ 必须**按工作区分组**检查：/day 的排序契约是"每个工作区内部按 startTime 升序"，
+    // 把多个工作区的条目拉平成一个数组再比大小是错的 —— 不同工作区的时间本来就会交错。
+    // 首版就是拉平比较，只有两个工作区时"碰巧"通过；三期同步进来的 rocs 工作区
+    // （12:10）接在 local/DSH-LogWiki（23:11）后面才把它暴露出来。**是尺子错了，不是产品错了。**
+    record(
+      '条目按时间升序（各工作区内）',
+      workspaces.every((w) =>
+        (w.entries ?? []).every((e, i, arr) => i === 0 || (arr[i - 1].startTime ?? 0) <= (e.startTime ?? 0)),
+      ),
+      `${entries.length} 条 / ${workspaces.length} 个工作区，分组检查`,
+    )
     record('条目带标签字段', entries.every((e) => typeof e.tag === 'string'), '')
 
     // 守恒不变量（补出来的）：工作区卡分项之和 == 当天合计。
@@ -259,6 +269,47 @@ async function main() {
       typeof ap.json?.prompt === 'string' && ap.json.prompt.includes('logwiki_write_digest'), '')
   } else {
     record('简报验证（需要活动日）', false, '热力图无活动日')
+  }
+
+  // 9) 二期：远程来源
+  const srcList = await req('/sources')
+  record('/sources 可达且带体量统计',
+    srcList.status === 200 && srcList.json?.ok === true && Array.isArray(srcList.json.sources) &&
+      srcList.json.sources.every((s) => typeof s.sessionCount === 'number' && typeof s.entryCount === 'number'),
+    `sources=[${(srcList.json?.sources ?? []).map((s) => s.id).join(',')}] remoteEnabled=${srcList.json?.remoteEnabled}`)
+  record('local 来源天然存在', (srcList.json?.sources ?? []).some((s) => s.id === 'local' && s.kind === 'local'), '')
+
+  const disc = await req('/source/discover')
+  record('/source/discover 可达',
+    disc.status === 200 && disc.json?.ok === true && Array.isArray(disc.json.aliases),
+    disc.json?.available === true ? `WSL 可用，别名=[${(disc.json.aliases ?? []).join(',')}]` : `WSL 不可用：${String(disc.json?.error ?? '')}`)
+
+  const pr = await req('/source/prompt', {
+    method: 'POST', guard: true, body: { label: '验收用', sshAlias: 'rocs', dshHome: '/tmp/x' },
+  })
+  record('POST /source/prompt 生成可交给智能体的提示词',
+    pr.status === 200 && typeof pr.json?.prompt === 'string' && pr.json.prompt.length > 200,
+    `${pr.json?.prompt?.length ?? 0} 字`)
+  record('提示词要求加载 f2a-ssh（需求原文要求）',
+    typeof pr.json?.prompt === 'string' && pr.json.prompt.includes('f2a-ssh'), '')
+  record('提示词要求缺信息时用 ask_user_question 问',
+    typeof pr.json?.prompt === 'string' && pr.json.prompt.includes('ask_user_question'), '')
+
+  // 变更类：只在 --mutate 时对**专用实例**跑（会写真数据）
+  if (MUTATE) {
+    const bad = await req('/source/add', { method: 'POST', guard: true, body: { label: 'x', sshAlias: 'a; rm -rf /', dshHome: '/a' } })
+    record('注入型别名被拒（400，不落库）', bad.status === 400 && bad.json?.ok !== true, String(bad.json?.error ?? '').slice(0, 60))
+    const added = await req('/source/add', { method: 'POST', guard: true, body: { label: '验收来源', sshAlias: 'rocs', dshHome: '/tmp/accept-l1' } })
+    record('POST /source/add 登记成功', added.status === 200 && added.json?.ok === true, String(added.json?.source?.id ?? ''))
+    const after = await req('/sources')
+    const id = added.json?.source?.id
+    record('新来源出现在 /sources 里', (after.json?.sources ?? []).some((s) => s.id === id), `id=${id}`)
+    const del = await req('/source/delete', { method: 'POST', guard: true, body: { sourceId: id } })
+    record('POST /source/delete 清理干净', del.status === 200 && del.json?.ok === true, `会话${del.json?.removedSessions} 条目${del.json?.removedEntries}`)
+    const finalList = await req('/sources')
+    record('删除后不再出现', (finalList.json?.sources ?? []).every((s) => s.id !== id), '')
+  } else {
+    console.log('SKIP  来源增删往返（只读模式；加 --mutate 在专用实例上启用）')
   }
 
   // 9) 真机模型自检（可选，消耗 token）

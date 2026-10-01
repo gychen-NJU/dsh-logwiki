@@ -36,7 +36,19 @@ const DEFAULT_CONFIG = Object.freeze({
   },
   heatmap: { metric: 'turns', includeSubagents: true },
   ui: { language: 'zh', weekStart: 1 },
-  remote: { enable: false, sinceDays: 90, maxBytesPerSync: 33554432 },
+  remote: {
+    enable: false,
+    sinceDays: 90,
+    maxBytesPerSync: 33554432,
+    // 以下为二期接线时补的边界（原设计只写了上面三项）
+    maxFilesPerSync: 400,
+    // 单个文件 base64 后仍要完整收下的上限。
+    // ⚠️ 曾设 16 MB —— 但 base64 会膨胀 4/3，一个 ~11 MB 的会话日志就会撞顶、
+    // 输出被截断，实测导致 20 个远端文件里有 1 个拉不下来。给足到 64 MB。
+    maxBytesPerFile: 67108864,
+    commandTimeoutMs: 120000,
+    maxSourcesPerRun: 3,
+  },
 })
 
 function mergeConfig(raw) {  const out = {}
@@ -181,6 +193,21 @@ function isoWeekKeyOf(dateKey) {
 }
 
 /**
+ * 把一段 shell 脚本交给 `wsl.exe` 执行：**脚本一律 base64 包裹**。
+ *
+ * 为什么非要 base64：从 Windows 到 WSL 要穿过 `wsl.exe → sh -lc → (目标 shell)` 两层，
+ * 任何引号/`$`/换行都会被吃掉一层。base64 之后待插值的只剩 base64 字符集，注入面归零。
+ * （`lib/remote.js` 的 `buildSshArgv` 用的是同一招，只是再往外套了一层 ssh。）
+ */
+function wslScriptArgv(script, wslDistro) {
+  const inner = `echo ${Buffer.from(String(script), 'utf8').toString('base64')} | base64 -d | sh`
+  const argv = ['wsl.exe']
+  if (typeof wslDistro === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(wslDistro)) argv.push('-d', wslDistro)
+  argv.push('-e', 'sh', '-lc', inner)
+  return argv
+}
+
+/**
  * 运行时服务可用性探测（长期诊断用）。
  * 实测发现 workspaceRegistry 可能因依赖未满足而始终 pending —— 本插件**不硬依赖**它，
  * 拿不到就退回 cwd 的 basename 作工作区标签。
@@ -252,7 +279,17 @@ export function apply(ctx, config = {}) {
   }
 
   // ---------------------------------------------------------------- 兄弟模块（动态加载 + 降级）
-  const mods = { extract: null, fold: null, store: null, summarize: null, prompts: null }
+  const mods = {
+    extract: null,
+    fold: null,
+    store: null,
+    summarize: null,
+    prompts: null,
+    // 二期（远程来源）。同样是动态 import + 降级：缺了只让相关端点回 503，
+    // 不影响一期功能——这样"半成品不会炸掉用户环境"。
+    remote: null,
+    remoteSources: null,
+  }
   const modErrors = {}
 
   async function loadModules() {
@@ -262,6 +299,8 @@ export function apply(ctx, config = {}) {
       ['store', './store.js'],
       ['summarize', './summarize.js'],
       ['prompts', './prompts.js'],
+      ['remote', './remote.js'],
+      ['remoteSources', './remote-sources.js'],
     ]
     for (const [key, spec] of specs) {
       try {
@@ -470,6 +509,32 @@ export function apply(ctx, config = {}) {
     scan.truncated = truncated
     scan.pending = truncated ? Math.max(0, candidates.length - processed) : 0
 
+    // 2.5) 远端来源（二期）—— **必须排在重算天聚合与摘要之前**。
+    //
+    // 踩过的坑：最初把它放在整个 doRefresh 的最末尾，结果远端会话虽然进了 sessions，
+    // 却赶不上本轮的重算与摘要 —— 日历上只多了"回合数"，一条任务卡都不出。
+    // 顺序反了，用户看到的就是"同步成功但什么都没发生"。
+    const remoteSummary = []
+    if (resolved.remote.enable === true && mods.remote !== null) {
+      const list = Object.values(db.get().sources ?? {}).filter(
+        (s) => s !== null && typeof s === 'object' && s.kind === 'remote' && s.enabled !== false,
+      )
+      for (const source of list.slice(0, resolved.remote.maxSourcesPerRun)) {
+        // 手动同步正在进行 → 这轮跳过，别去抢那条共享的 ControlMaster 连接
+        if (remoteRunning !== null) break
+        remoteRunning = source.id
+        try {
+          remoteSummary.push({ label: source.label, ...(await syncSource(source.id)) })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          warn(`[dsh-logwiki] 同步 ${source.label} 异常：${message}`)
+          remoteSummary.push({ label: source.label, ok: false, error: message })
+        } finally {
+          remoteRunning = null
+        }
+      }
+    }
+
     // 3) 重算天聚合
     const after = db.get()
     const sessions = after.sessions ?? {}
@@ -525,7 +590,7 @@ export function apply(ctx, config = {}) {
     }
 
     pushProgress({ phase: 'idle', finished: true, done: progress.total, current: '' })
-    return { changed, summarized, scanned: scan.scanned, failed: scan.failed }
+    return { changed, summarized, scanned: scan.scanned, failed: scan.failed, remote: remoteSummary }
   }
 
   function requireModsNoRes(keys) {
@@ -759,6 +824,23 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  /**
+   * 登记/更新一个远程来源。
+   *
+   * `/source/add`（对话框直连）与 `logwiki_import_source`（智能体回写）**共用这一条写入口**，
+   * 保证两条路径落库结果完全一致 —— 否则很容易出现"界面加的能同步、智能体加的不能"。
+   */
+  async function upsertSource(source) {
+    const db = await ensureStore()
+    if (db === null) throw new Error('store 不可用')
+    db.update((draft) => {
+      if (draft.sources === undefined) draft.sources = {}
+      const prev = draft.sources[source.id]
+      draft.sources[source.id] = prev === undefined ? source : { ...prev, ...source }
+    })
+    return source
+  }
+
   function registerTools() {
     const tools = ctx.get('tools')
     if (tools === undefined) {
@@ -769,7 +851,12 @@ export function apply(ctx, config = {}) {
       toolErrors['<tools service>'] = 'tools.register 不是函数'
       return
     }
-    for (const def of [digestTool()]) {
+    const defs = [digestTool()]
+    // 二期工具按可用性挂载：remote-sources 模块缺失时只是少一个工具，不影响一期。
+    if (mods.remoteSources !== null && typeof mods.remoteSources.makeImportSourceTool === 'function') {
+      defs.push(mods.remoteSources.makeImportSourceTool({ upsertSource }))
+    }
+    for (const def of defs) {
       try {
         const dispose = tools.register(def)
         registeredTools.push(def.name)
@@ -805,6 +892,244 @@ export function apply(ctx, config = {}) {
     })()
     running = { jobId, task }
     return { jobId, running: true }
+  }
+
+  // ---------------------------------------------------------------- 远程来源同步（二期）
+  /**
+   * 同一时刻只允许一个来源在同步。
+   * 理由：WSL 里的 ControlMaster 是**一条共享连接**，并发发起多路 ssh 只会互相抢连接、
+   * 还会把 2FA 提示搅乱；串行反而更快也更可解释。
+   */
+  let remoteRunning = null
+
+  /**
+   * 跑一条远端命令并回收全部输出。
+   *
+   * `ctx.subprocess.spawn` 的 spec **不套任何默认值** —— argv / cwd / stdio / graceMs 必须给全。
+   * stdout 用 collect 模式（进程结束后仍可读），`handle.done` 给退出事实。
+   */
+  async function runRemote(argv, options) {
+    const subprocess = ctx.get('subprocess')
+    if (subprocess === undefined || typeof subprocess.spawn !== 'function') {
+      return { ok: false, error: 'subprocess 服务不可用（本实例无法执行外部命令）' }
+    }
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), options.timeoutMs)
+    try {
+      const handle = subprocess.spawn({
+        argv,
+        cwd: options.cwd,
+        stdio: {
+          stdin: 'ignore',
+          stdout: { mode: 'collect', maxBytes: options.maxBytes },
+          stderr: { mode: 'collect', maxBytes: 64 * 1024 },
+        },
+        graceMs: 10000,
+        signal: controller.signal,
+      })
+      const outcome = await handle.done
+      const collected = handle.collected === undefined ? {} : handle.collected
+      const out = collected.stdout === undefined ? null : collected.stdout.readFrom(0)
+      const err = collected.stderr === undefined ? null : collected.stderr.readFrom(0)
+      return {
+        ok: outcome.exitCode === 0,
+        exitCode: outcome.exitCode,
+        stdout: out !== null && typeof out.text === 'string' ? out.text : '',
+        stderr: err !== null && typeof err.text === 'string' ? err.text : '',
+        // lossy = 内存尾部被截断（maxBytes 给小了）。必须显式判它，否则会拿半截 base64 去解码。
+        lossy: out !== null && out.lossy === true,
+      }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /**
+   * 把远端失败翻译成**可操作的指引**。
+   * 这里是本功能最容易把用户卡住的地方 —— 2FA 需要真人参与，报"退出码 255"等于没报。
+   */
+  function explainRemoteFailure(result, alias, label) {
+    if (typeof result.error === 'string' && result.error !== '') return `连接 ${label} 失败：${result.error}`
+    const text = String(result.stderr ?? '')
+    if (/Permission denied|publickey/i.test(text)) {
+      return `连不上 ${label}：需要先完成 2FA。请在 WSL 终端执行 ssh -fN ${alias} 并通过验证，之后本机可免验证复用该连接。`
+    }
+    if (/Host key verification failed/i.test(text)) {
+      return `连不上 ${label}：主机指纹未确认。请在 WSL 终端先手动 ssh ${alias} 一次并接受指纹。`
+    }
+    if (/Could not resolve hostname/i.test(text)) {
+      return `连不上 ${label}：主机名解析失败。请核对 WSL 的 ~/.ssh/config 里该别名的 HostName。`
+    }
+    if (/No such file or directory|not found/i.test(text)) {
+      return `${label}：远端找不到目标路径，请核对远端 DSH_HOME 是否正确。`
+    }
+    const tail = text.trim().split('\n').filter(Boolean).slice(-2).join(' ')
+    return `${label} 远端命令退出码 ${String(result.exitCode)}${tail === '' ? '' : '：' + tail.slice(0, 240)}`
+  }
+
+  /**
+   * 同步一个远程来源：远端清单 → 比对账本 → 只拉新增/变化 → base64 解码 → 指纹 → 落库。
+   *
+   * 传输链路（f2a-ssh 那套）：`wsl.exe -e sh -lc "ssh <别名> '<base64 后的脚本>'"`。
+   * 远端脚本一律 base64 包裹，绕开 PowerShell→wsl→sh→ssh 的多层转义；别名与远端路径都过白名单校验。
+   */
+  async function syncSource(sourceId) {
+    if (mods.remote === null || mods.extract === null || mods.fold === null) {
+      return { ok: false, error: 'remote / extract / fold 模块未就绪' }
+    }
+    const R = mods.remote
+    const cfg = resolved.remote
+    const db = await ensureStore()
+    if (db === null) return { ok: false, error: 'store 不可用' }
+    const source = db.get().sources?.[sourceId]
+    if (source === undefined || source.kind !== 'remote') return { ok: false, error: `不是远程来源：${sourceId}` }
+
+    const startedAt = Date.now()
+    const mark = (patch) => {
+      db.update((draft) => {
+        if (draft.sources === undefined) draft.sources = {}
+        const prev = draft.sources[sourceId]
+        if (prev === undefined) return
+        draft.sources[sourceId] = { ...prev, ...patch }
+      })
+    }
+    const fail = (message) => {
+      mark({ lastSyncAt: startedAt, lastSyncStatus: 'error', lastError: message })
+      pushProgress({ phase: 'idle', finished: true, current: '' })
+      warn(`[dsh-logwiki] 同步 ${source.label} 失败：${message}`)
+      return { ok: false, error: message }
+    }
+
+    // 1) 远端清单
+    pushProgress({ phase: 'remote', done: 0, total: 0, current: `${source.label}：读取远端清单`, finished: false })
+    let indexResult
+    try {
+      indexResult = await runRemote(
+        R.buildSshArgv({
+          alias: source.sshAlias,
+          wslDistro: source.wslDistro,
+          script: R.buildIndexCommand({ dshHome: source.dshHome, sinceDays: source.sinceDays }),
+        }),
+        { cwd: process.cwd(), timeoutMs: cfg.commandTimeoutMs, maxBytes: 4 * 1024 * 1024 },
+      )
+    } catch (error) {
+      return fail(`连接 ${source.label} 失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+    if (indexResult.ok !== true) return fail(explainRemoteFailure(indexResult, source.sshAlias, source.label))
+
+    const parsed = R.parseIndex(indexResult.stdout)
+    if (parsed.malformed.length > 0) {
+      warn(`[dsh-logwiki] ${source.label} 的远端清单有 ${parsed.malformed.length} 行无法解析（已跳过）`)
+    }
+    const plan = R.planSync({
+      index: parsed.entries,
+      ledger: db.get().syncLedger?.[sourceId] ?? {},
+      now: Date.now(),
+      sinceDays: typeof source.sinceDays === 'number' && source.sinceDays > 0 ? source.sinceDays : cfg.sinceDays,
+      maxFiles: cfg.maxFilesPerSync,
+      maxBytes: cfg.maxBytesPerSync,
+    })
+
+    if (plan.fetch.length === 0) {
+      mark({ lastSyncAt: Date.now(), lastSyncStatus: 'ok', lastError: null })
+      pushProgress({ phase: 'idle', finished: true, current: '' })
+      return {
+        ok: true,
+        label: source.label,
+        indexCount: parsed.entries.length,
+        fetched: 0,
+        skippedUnchanged: plan.skippedUnchanged,
+        skippedOld: plan.skippedOld,
+      }
+    }
+
+    // 2) 逐个拉取（串行；从新到旧由 planSync 保证）
+    const okRows = []
+    let fetched = 0
+    let failed = 0
+    const total = plan.fetch.length
+    for (const item of plan.fetch) {
+      pushProgress({ phase: 'remote', done: fetched + failed, total, current: `${source.label}：拉取 ${fetched + failed + 1}/${total}`, finished: false })
+      // base64 使体积膨胀约 4/3，再留 2 MB 余量。
+      // **先预判再下载**：超出上限的文件直接跳过并说清原因，不白传一趟。
+      const needed = Math.ceil(item.size * 1.4) + 2097152
+      if (needed > cfg.maxBytesPerFile) {
+        failed += 1
+        warn(`[dsh-logwiki] ${source.label} 跳过超大文件 ${item.path}（${Math.round(item.size / 1048576)} MB，超过 maxBytesPerFile=${Math.round(cfg.maxBytesPerFile / 1048576)} MB）`)
+        await yieldToLoop()
+        continue
+      }
+      let got
+      try {
+        got = await runRemote(
+          R.buildSshArgv({ alias: source.sshAlias, wslDistro: source.wslDistro, script: R.buildFetchCommand(item.path) }),
+          { cwd: process.cwd(), timeoutMs: cfg.commandTimeoutMs, maxBytes: needed },
+        )
+      } catch (error) {
+        got = { ok: false, error: error instanceof Error ? error.message : String(error) }
+      }
+      if (got.ok !== true || got.lossy === true) {
+        failed += 1
+        warn(`[dsh-logwiki] ${source.label} 拉取失败（跳过）${item.path}：${got.lossy === true ? '输出被截断（maxBytes 太小）' : explainRemoteFailure(got, source.sshAlias, source.label)}`)
+        await yieldToLoop()
+        continue
+      }
+      try {
+        const fp = R.remotePayloadToFingerprint(got.stdout, { extract: mods.extract, sourceId })
+        if (fp === null) {
+          failed += 1
+          warn(`[dsh-logwiki] ${source.label} 的 ${item.path} 不是可识别的 v4 会话日志（跳过）`)
+        } else {
+          okRows.push({ item, fp })
+          fetched += 1
+        }
+      } catch (error) {
+        failed += 1
+        warn(`[dsh-logwiki] ${source.label} 解码失败（跳过）${item.path}：${error instanceof Error ? error.message : String(error)}`)
+      }
+      // 逐文件让出事件循环：会话日志解码是纯计算，连续解多个会像回填那样把网页卡住。
+      await yieldToLoop()
+    }
+
+    // 3) 落库（一次 update，避免 n 次全量落盘）
+    if (okRows.length > 0) {
+      db.update((draft) => {
+        if (draft.sessions === undefined) draft.sessions = {}
+        if (draft.syncLedger === undefined) draft.syncLedger = {}
+        const ledger = draft.syncLedger[sourceId] ?? {}
+        // 远端没有本地的工作区标题注册表，用远端 cwd 的末段做标签（与本地兜底口径一致）。
+        const noTitles = new Map()
+        for (const row of okRows) {
+          const sessionId = row.fp.sessionId
+          const fingerprint = mods.extract.sessionFingerprintOf(row.fp)
+          const cwd = typeof row.fp.cwd === 'string' ? row.fp.cwd : ''
+          draft.sessions[`${sourceId}::${sessionId}`] = {
+            ...row.fp,
+            sourceId,
+            workspaceLabel: workspaceLabelOf(cwd, noTitles),
+            fingerprint,
+          }
+          ledger[row.item.path] = { mtimeMs: row.item.mtimeMs, size: row.item.size }
+        }
+        draft.syncLedger[sourceId] = ledger
+      })
+    }
+
+    mark({ lastSyncAt: Date.now(), lastSyncStatus: failed > 0 ? 'partial' : 'ok', lastError: null })
+    pushProgress({ phase: 'idle', finished: true, current: '' })
+    log(`[dsh-logwiki] 同步 ${source.label} 完成：拉取 ${fetched}，失败 ${failed}，未变化 ${plan.skippedUnchanged}`)
+    return {
+      ok: true,
+      label: source.label,
+      indexCount: parsed.entries.length,
+      fetched,
+      failed,
+      skippedUnchanged: plan.skippedUnchanged,
+      skippedOld: plan.skippedOld,
+      skippedOverBudget: plan.skippedOverBudget,
+    }
   }
 
   // ---------------------------------------------------------------- 路由
@@ -1293,8 +1618,221 @@ export function apply(ctx, config = {}) {
       sendJson(res, 503, { ok: false, error: 'store 不可用' })
       return
     }
-    const sources = db.get().sources ?? {}
-    sendJson(res, 200, { ok: true, sources: Object.values(sources) })
+    const data = db.get()
+    const sources = data.sources ?? {}
+    const sessions = data.sessions ?? {}
+    const entries = data.entries ?? {}
+    const sessionKeys = Object.keys(sessions)
+    const entryRows = Object.values(entries).filter((e) => e !== null && typeof e === 'object')
+    // 附上每个来源的体量，供 UI 显示"这个来源有多少内容"并决定是否值得同步。
+    const rows = Object.values(sources).map((s) => {
+      const prefix = `${s.id}::`
+      return {
+        ...s,
+        sessionCount: sessionKeys.filter((k) => k.startsWith(prefix)).length,
+        entryCount: entryRows.filter((e) => e.sourceId === s.id).length,
+      }
+    })
+    sendJson(res, 200, { ok: true, sources: rows, remoteEnabled: resolved.remote.enable === true })
+  })
+
+  /**
+   * 探测本机 WSL 环境：是否可用、默认发行版、`~/.ssh/config` 里有哪些别名。
+   * 只在「添加来源」对话框打开时调一次（会 spawn 一次 wsl.exe，不该被高频端点顺带调用）。
+   */
+  routes.set('/source/discover', async (req, res) => {
+    const subprocess = ctx.get('subprocess')
+    if (subprocess === undefined || typeof subprocess.spawn !== 'function') {
+      sendJson(res, 200, { ok: true, available: false, aliases: [], error: 'subprocess 服务不可用' })
+      return
+    }
+    const script = [
+      "f=$HOME/.ssh/config",
+      '[ -f "$f" ] || exit 0',
+      "grep -hiE '^[[:space:]]*Host[[:space:]]' \"$f\" | sed -E 's/^[[:space:]]*[Hh]ost[[:space:]]+//' | tr ' ' '\\n' | grep -vE '^[*?!]' | grep -v '^$' | sort -u",
+    ].join('\n')
+    const argv = wslScriptArgv(script)
+    const got = await runRemote(argv, { cwd: process.cwd(), timeoutMs: 20000, maxBytes: 256 * 1024 })
+    if (got.ok !== true) {
+      sendJson(res, 200, {
+        ok: true,
+        available: false,
+        aliases: [],
+        error: explainRemoteFailure(got, '<wsl>', 'WSL'),
+      })
+      return
+    }
+    const aliases = String(got.stdout ?? '')
+      .split('\n')
+      .map((s) => s.trim())
+      .filter((s) => /^[A-Za-z0-9._-]{1,128}$/.test(s))
+    sendJson(res, 200, { ok: true, available: true, aliases })
+  })
+
+  routes.set('/source/add', async (req, res) => {
+    const blocked = guardMutation(req)
+    if (blocked !== null) {
+      sendJson(res, blocked.code, { ok: false, error: blocked.error })
+      return
+    }
+    if (!requireMods(res, ['store', 'remoteSources'])) return
+    const body = await readJsonBody(req, 64 * 1024)
+    if (body === null) {
+      sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' })
+      return
+    }
+    let source
+    try {
+      source = mods.remoteSources.normalizeRemoteSource({
+        label: body.label,
+        sshAlias: body.sshAlias,
+        dshHome: body.dshHome,
+        wslDistro: typeof body.wslDistro === 'string' && body.wslDistro !== '' ? body.wslDistro : undefined,
+        sinceDays: typeof body.sinceDays === 'number' ? body.sinceDays : undefined,
+      })
+    } catch (error) {
+      // 校验失败是**用户输入问题**，回 400 并带上原因（而不是 500）。
+      sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) })
+      return
+    }
+    try {
+      await upsertSource(source)
+    } catch (error) {
+      sendJson(res, 503, { ok: false, error: error instanceof Error ? error.message : String(error) })
+      return
+    }
+    sendJson(res, 200, { ok: true, source })
+  })
+
+  routes.set('/source/delete', async (req, res) => {
+    const blocked = guardMutation(req)
+    if (blocked !== null) {
+      sendJson(res, blocked.code, { ok: false, error: blocked.error })
+      return
+    }
+    if (!requireMods(res, ['store', 'fold'])) return
+    const body = await readJsonBody(req, 64 * 1024)
+    if (body === null) {
+      sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' })
+      return
+    }
+    const sourceId = typeof body.sourceId === 'string' ? body.sourceId : ''
+    if (sourceId === 'local') {
+      sendJson(res, 400, { ok: false, error: '本机来源不能删除' })
+      return
+    }
+    const db = await ensureStore()
+    if (db === null) {
+      sendJson(res, 503, { ok: false, error: 'store 不可用' })
+      return
+    }
+    if (db.get().sources?.[sourceId] === undefined) {
+      sendJson(res, 404, { ok: false, error: `来源不存在：${sourceId}` })
+      return
+    }
+
+    // 一并清掉这个来源的会话、条目、同步账本 —— 否则源没了、数据还在，
+    // 会留下一批"来源已删除"的孤儿条目，界面按来源分区时无从归属。
+    const prefix = `${sourceId}::`
+    let removedSessions = 0
+    let removedEntries = 0
+    db.update((draft) => {
+      if (draft.sessions !== undefined) {
+        for (const key of Object.keys(draft.sessions)) {
+          if (key.startsWith(prefix)) {
+            delete draft.sessions[key]
+            removedSessions += 1
+          }
+        }
+      }
+      if (draft.entries !== undefined) {
+        for (const [id, entry] of Object.entries(draft.entries)) {
+          if (entry !== null && typeof entry === 'object' && entry.sourceId === sourceId) {
+            delete draft.entries[id]
+            removedEntries += 1
+          }
+        }
+      }
+      if (draft.entryOrder !== undefined) {
+        for (const date of Object.keys(draft.entryOrder)) {
+          draft.entryOrder[date] = draft.entryOrder[date].filter((id) => draft.entries[id] !== undefined)
+        }
+      }
+      if (draft.syncLedger !== undefined) delete draft.syncLedger[sourceId]
+      if (draft.sources !== undefined) delete draft.sources[sourceId]
+    })
+
+    // 立刻重算天聚合，别让界面停留在一个已不存在的来源上
+    const after = db.get()
+    const days = mods.fold.buildDays(after.sessions ?? {}, {
+      includeSubagents: resolved.heatmap.includeSubagents !== false,
+      tzOffsetMinutes: tzOffsetMinutes(),
+    })
+    db.update((draft) => {
+      draft.days = days
+      draft.updatedAt = Date.now()
+    })
+    log(`[dsh-logwiki] 已删除来源 ${sourceId}：会话 ${removedSessions}，条目 ${removedEntries}`)
+    sendJson(res, 200, { ok: true, sourceId, removedSessions, removedEntries })
+  })
+
+  routes.set('/source/prompt', async (req, res) => {
+    const blocked = guardMutation(req)
+    if (blocked !== null) {
+      sendJson(res, blocked.code, { ok: false, error: blocked.error })
+      return
+    }
+    if (!requireMods(res, ['remoteSources'])) return
+    const body = await readJsonBody(req, 64 * 1024)
+    if (body === null) {
+      sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' })
+      return
+    }
+    const prompt = mods.remoteSources.buildAddSourcePrompt({
+      label: typeof body.label === 'string' ? body.label : '',
+      sshAlias: typeof body.sshAlias === 'string' ? body.sshAlias : '',
+      dshHome: typeof body.dshHome === 'string' ? body.dshHome : '',
+      wslDistro: typeof body.wslDistro === 'string' ? body.wslDistro : '',
+      sinceDays: typeof body.sinceDays === 'number' ? body.sinceDays : undefined,
+      toolName: 'logwiki_import_source',
+    })
+    sendJson(res, 200, { ok: true, prompt })
+  })
+
+  routes.set('/source/sync', async (req, res) => {
+    const blocked = guardMutation(req)
+    if (blocked !== null) {
+      sendJson(res, blocked.code, { ok: false, error: blocked.error })
+      return
+    }
+    if (!requireMods(res, ['store', 'extract', 'fold', 'remote', 'remoteSources'])) return
+    const body = await readJsonBody(req, 64 * 1024)
+    if (body === null) {
+      sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' })
+      return
+    }
+    const sourceId = typeof body.sourceId === 'string' ? body.sourceId : ''
+    if (sourceId === '') {
+      sendJson(res, 400, { ok: false, error: '缺少 sourceId' })
+      return
+    }
+    if (remoteRunning !== null) {
+      sendJson(res, 409, { ok: false, error: `已有来源正在同步：${remoteRunning}`, running: remoteRunning })
+      return
+    }
+    remoteRunning = sourceId
+    // 异步跑：一次同步可能几分钟（远端慢 + 本地解码），不能让 HTTP 请求挂着。
+    // 客户端用既有 SSE 进度条观察，完成后拉 /sources 看状态。
+    syncSource(sourceId)
+      .catch((error) => warn(`[dsh-logwiki] 同步 ${sourceId} 异常：${error instanceof Error ? error.message : String(error)}`))
+      .finally(() => {
+        remoteRunning = null
+      })
+    sendJson(res, 200, { ok: true, running: sourceId, message: `已开始同步，请观察进度条` })
+  })
+
+  routes.set('/source/sync-status', (req, res) => {
+    sendJson(res, 200, { ok: true, running: remoteRunning })
   })
 
   // ---------------------------------------------------------------- 分发

@@ -31,6 +31,10 @@
           language: zh
           weekStart: 1
         remote:
-          enable: false
+          enable: true
           sinceDays: 90
           maxBytesPerSync: 33554432
+          maxFilesPerSync: 400
+          maxBytesPerFile: 67108864
+          commandTimeoutMs: 120000
+          maxSourcesPerRun: 3

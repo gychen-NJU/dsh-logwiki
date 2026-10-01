@@ -436,6 +436,10 @@ select.lw-field { cursor: pointer; }
 }
 .lw-digest-title { font-weight: 600; font-size: 13px; }
 .lw-digest-body { padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+/* 「添加来源」表单的一行：左边标签定宽、右边控件撑满（标签允许换行，中文较长） */
+.lw-field-label { display: flex; align-items: center; gap: 8px; }
+.lw-field-label > .lw-meta { min-width: 160px; white-space: normal; }
+.lw-field-label > .lw-field { flex: 1; min-width: 0; }
 .lw-headline {
   color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 1.6;
   white-space: pre-wrap; word-break: break-word;
@@ -860,6 +864,239 @@ select.lw-field { cursor: pointer; }
             (bad ? '⚠ ' : '') + label,
           )
         }),
+        props.onAdd !== undefined
+          ? h(
+              'button',
+              {
+                key: '__add-source',
+                type: 'button',
+                className: 'lw-chip',
+                onClick: props.onAdd,
+                title: '连接别的 DSH（例如 rocs）—— 远端会话会作为独立来源分区显示',
+              },
+              '+ 添加来源',
+            )
+          : null,
+      )
+    }
+
+    /**
+     * 「添加 / 管理来源」区块（二期）。
+     *
+     * 两条登记路径（对应用户需求里"可能会遇到智能体索要信息的情况"）：
+     *   · **登记来源** —— 信息齐了就直接落库（走 /source/add）
+     *   · **交给智能体** —— 生成提示词写进输入框，由智能体加载 f2a-ssh 去连、
+     *     缺信息时用 ask_user_question 问你，最后调 logwiki_import_source 落库
+     */
+    function SourceDialog(props) {
+      const [label, setLabel] = useState('')
+      const [alias, setAlias] = useState('')
+      const [distro, setDistro] = useState('')
+      const [dshHome, setDshHome] = useState('')
+      const [days, setDays] = useState('90')
+      const [busy, setBusy] = useState(false)
+      const [promptText, setPromptText] = useState('')
+      const [discover, setDiscover] = useState(null)
+      // 删除做两段式确认：不用 window.confirm —— 沙箱/iframe 里可能被拦，且阻塞式弹窗体验更差。
+      const [confirming, setConfirming] = useState(null)
+      const promptRef = useRef(null)
+
+      useEffect(() => {
+        request('/source/discover').then((res) => {
+          setDiscover(res.ok === true && isObj(res.data) ? res.data : { available: false, aliases: [] })
+        })
+      }, [])
+
+      const aliases = discover !== null && Array.isArray(discover.aliases) ? discover.aliases : []
+      const missing = []
+      if (alias.trim() === '') missing.push('SSH 别名')
+      if (dshHome.trim() === '') missing.push('远端 DSH_HOME')
+
+      const payload = () => ({
+        label: label.trim() === '' ? alias.trim() : label.trim(),
+        sshAlias: alias.trim(),
+        dshHome: dshHome.trim(),
+        wslDistro: distro.trim(),
+        sinceDays: Number.isFinite(Number(days)) && Number(days) > 0 ? Number(days) : 90,
+      })
+
+      const add = () => {
+        setBusy(true)
+        request('/source/add', { method: 'POST', body: payload() }).then((res) => {
+          setBusy(false)
+          if (res.ok === true) {
+            toast('来源已登记')
+            setLabel('')
+            props.onChanged()
+          } else {
+            toast('登记失败：' + String(res.error || '未知错误'), 'error')
+          }
+        })
+      }
+
+      const askAgent = () => {
+        setBusy(true)
+        request('/source/prompt', { method: 'POST', body: payload() }).then((res) => {
+          setBusy(false)
+          if (res.ok === true && isObj(res.data) && typeof res.data.prompt === 'string') {
+            setPromptText(res.data.prompt)
+            setPendingComposerText(res.data.prompt)
+          } else {
+            toast('生成提示词失败：' + String(res.error || '未知错误'), 'error')
+          }
+        })
+      }
+
+      const field = (key, value, setter, placeholder, list) =>
+        h(
+          'label',
+          { className: 'lw-field-label', key: key },
+          h('span', { className: 'lw-meta' }, key),
+          list === undefined
+            ? h('input', { className: 'lw-field', value: value, placeholder: placeholder, onChange: (e) => setter(e.target.value) })
+            : h(
+                'span',
+                { style: { display: 'flex', gap: 6, flex: 1 } },
+                h('input', {
+                  className: 'lw-field',
+                  value: value,
+                  placeholder: placeholder,
+                  list: 'lw-ssh-aliases',
+                  onChange: (e) => setter(e.target.value),
+                  style: { flex: 1 },
+                }),
+                h(
+                  'datalist',
+                  { id: 'lw-ssh-aliases' },
+                  aliases.map((a) => h('option', { key: a, value: a })),
+                ),
+              ),
+        )
+
+      const remote = Array.isArray(props.rows) ? props.rows.filter((s) => isObj(s) && s.kind === 'remote') : []
+
+      return h(
+        'div',
+        { className: 'lw-digest' },
+        h(
+          'div',
+          { className: 'lw-digest-head' },
+          h('span', { className: 'lw-digest-title' }, '添加来源'),
+          h(
+            'span',
+            { className: 'lw-meta' },
+            discover === null
+              ? '正在探测 WSL…'
+              : discover.available === true
+                ? `WSL 可用${aliases.length > 0 ? ' · ~/.ssh/config 里有：' + aliases.join('、') : ' · 未发现 ssh 别名'}`
+                : 'WSL 不可用：' + String(discover.error || '未知原因'),
+          ),
+          h('span', { className: 'lw-spacer' }),
+          h('button', { type: 'button', className: 'lw-btn lw-tiny', onClick: props.onClose }, '收起'),
+        ),
+        h(
+          'div',
+          { className: 'lw-digest-body' },
+          h('div', { className: 'lw-meta' }, '连接别的 DSH（例如 rocs）。远端会话会作为独立来源分区出现在日历里，与本机分开。'),
+          field('名称', label, setLabel, '短名称，例如 rocs'),
+          field('SSH 别名（WSL ~/.ssh/config）', alias, setAlias, '例如 rocs', true),
+          field('WSL 发行版（留空用默认）', distro, setDistro, '例如 Ubuntu'),
+          field('远端 DSH_HOME（绝对路径）', dshHome, setDshHome, '例如 /home/gychen/.dsh'),
+          field('回填天数', days, setDays, '90'),
+          missing.length > 0
+            ? h(
+                'div',
+                { className: 'lw-meta' },
+                '还缺：' +
+                  missing.join('、') +
+                  ' —— 可以自己填，也可以点「交给智能体」，让它加载 f2a-ssh 去连、缺什么就用提问工具问你。',
+              )
+            : null,
+          h(
+            'div',
+            { style: { display: 'flex', gap: 8, justifyContent: 'flex-end' } },
+            h('button', { type: 'button', className: 'lw-btn', onClick: add, disabled: busy === true || missing.length > 0 }, busy === true ? '处理中…' : '登记来源'),
+            h('button', { type: 'button', className: 'lw-btn', onClick: askAgent, disabled: busy === true }, busy === true ? '处理中…' : '交给智能体'),
+          ),
+          promptText.length > 0
+            ? h(
+                'div',
+                null,
+                h('div', { className: 'lw-meta' }, '提示词（已尝试写入输入框；没成功就手动复制到会话里发送）'),
+                h('textarea', { className: 'lw-promptbox', ref: promptRef, value: promptText, readOnly: true, onFocus: (e) => e.target.select() }),
+                h(
+                  'div',
+                  { style: { display: 'flex', gap: 8, justifyContent: 'flex-end' } },
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'lw-btn lw-tiny',
+                      onClick: () => {
+                        if (promptRef.current !== null) promptRef.current.select()
+                        try {
+                          document.execCommand('copy')
+                          toast('已复制')
+                        } catch (e) {
+                          toast('复制失败，请手动选择', 'error')
+                        }
+                      },
+                    },
+                    '复制',
+                  ),
+                  h('button', { type: 'button', className: 'lw-btn lw-tiny', onClick: () => setPromptText('') }, '关闭提示词'),
+                ),
+              )
+            : null,
+        ),
+        remote.length > 0
+          ? h(
+              'div',
+              { className: 'lw-digest-head', style: { borderTop: '1px solid var(--dsw-alias-border-l1)', borderBottom: 0 } },
+              h('span', { className: 'lw-meta' }, '已有远程来源'),
+            )
+          : null,
+        remote.map((s) =>
+          h(
+            'div',
+            { className: 'lw-digest-body', key: s.id, style: { flexDirection: 'row', alignItems: 'center', gap: 8 } },
+            h('span', { className: 'lw-pill' }, s.label),
+            h(
+              'span',
+              { className: 'lw-meta' },
+              `会话 ${s.sessionCount ?? 0} · 条目 ${s.entryCount ?? 0}` +
+                (s.lastSyncStatus === 'error' || (typeof s.lastError === 'string' && s.lastError.length > 0)
+                  ? ' · ⚠ ' + String(s.lastError || '上次同步失败')
+                  : s.lastSyncStatus === 'ok'
+                    ? ' · 已同步'
+                    : s.lastSyncStatus === 'partial'
+                      ? ' · 部分失败'
+                      : ' · 未同步'),
+            ),
+            h('span', { className: 'lw-spacer' }),
+            h(
+              'button',
+              { type: 'button', className: 'lw-btn lw-tiny', onClick: () => props.onSync(s.id), disabled: props.syncing === true },
+              props.syncing === true ? '同步中…' : '同步',
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'lw-btn lw-tiny',
+                onClick: () => {
+                  if (confirming === s.id) {
+                    setConfirming(null)
+                    props.onDelete(s.id)
+                  } else {
+                    setConfirming(s.id)
+                  }
+                },
+              },
+              confirming === s.id ? '确认删除？' : '删除',
+            ),
+          ),
+        ),
       )
     }
 
@@ -925,7 +1162,7 @@ select.lw-field { cursor: pointer; }
           },
           METRICS.map((m) => h('option', { key: m, value: m }, METRIC_LABEL[m])),
         ),
-        h(SourceChips, { sources: s.sources, selected: s.selectedSources, onToggle: s.onToggleSource }),
+        h(SourceChips, { sources: s.sources, selected: s.selectedSources, onToggle: s.onToggleSource, onAdd: s.onAddSource }),
         h('span', { className: 'lw-spacer' }),
         s.connState === 'open' ? h('span', { className: 'lw-meta', title: '进度通道已连接' }, '● 实时') : null,
         h(
@@ -1739,6 +1976,9 @@ select.lw-field { cursor: pointer; }
       const [progress, setProgress] = useState(null)
       const [connState, setConnState] = useState('idle')
       const [digestOpen, setDigestOpen] = useState(null) // {kind, period}
+      // 二期：来源管理区块 + 同步中标记
+      const [sourceOpen, setSourceOpen] = useState(false)
+      const [syncing, setSyncing] = useState(false)
 
       // 1) /ping 自检 + 拿默认指标
       useEffect(() => {
@@ -2033,6 +2273,39 @@ select.lw-field { cursor: pointer; }
       // 「有活动的周期」清单：做前后跳转 + 提示该周期有多少条条目
       const periodsFetch = useFetchData('/digests/periods', [refreshNonce])
 
+      // 二期：来源管理（用**原始** /sources 行，含 sessionCount/entryCount 与 lastError）
+      const sourceRows = useMemo(() => {
+        const r = sourcesState.result
+        if (r === null || r === undefined || r.ok !== true || !isObj(r.data) || !Array.isArray(r.data.sources)) return []
+        return r.data.sources
+      }, [sourcesState.result])
+      const syncSourceNow = useCallback((id) => {
+        setSyncing(true)
+        request('/source/sync', { method: 'POST', body: { sourceId: id } }).then((res) => {
+          setSyncing(false)
+          if (res.ok === true) toast('已开始同步，请看进度条')
+          else toast('同步失败：' + String(res.error || '未知错误'), 'error')
+        })
+      }, [])
+      const deleteSourceNow = useCallback((id) => {
+        request('/source/delete', { method: 'POST', body: { sourceId: id } }).then((res) => {
+          if (res.ok === true) {
+            const d = isObj(res.data) ? res.data : {}
+            toast(`已删除来源（会话 ${d.removedSessions === undefined ? 0 : d.removedSessions}，条目 ${d.removedEntries === undefined ? 0 : d.removedEntries}）`)
+            setRefreshNonce((n) => n + 1)
+          } else {
+            toast('删除失败：' + String(res.error || '未知错误'), 'error')
+          }
+        })
+      }, [])
+      // 同步完成后（进度条回到 idle）刷新一次列表，让状态点/计数更新
+      useEffect(() => {
+        if (progress !== null && progress.finished === true && progress.phase === 'idle') {
+          setRefreshNonce((n) => n + 1)
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [progress === null ? null : progress.finished])
+
       const version = ping !== null && ping !== undefined && typeof ping.version === 'string' ? ping.version : null
 
       // 8) 主体内容
@@ -2098,9 +2371,28 @@ select.lw-field { cursor: pointer; }
           onToggleSource: onToggleSource,
           onRefresh: onRefresh,
           onDigest: openDigest,
+          onAddSource: () => setSourceOpen(true),
         }),
         h(ScanBanner, { scan: scan, progress: progress, refreshing: refreshing }),
         h(ToastHost, null),
+        sourceOpen === true
+          ? h(
+              'div',
+              { style: { padding: '12px 12px 0' } },
+              h(
+                Boundary,
+                { label: '来源区块' },
+                h(SourceDialog, {
+                  rows: sourceRows,
+                  syncing: syncing,
+                  onChanged: () => setRefreshNonce((n) => n + 1),
+                  onSync: syncSourceNow,
+                  onDelete: deleteSourceNow,
+                  onClose: () => setSourceOpen(false),
+                }),
+              ),
+            )
+          : null,
         digestOpen !== null
           ? h(
               'div',
