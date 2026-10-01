@@ -32,7 +32,7 @@
 | 周/月简报 | 插件内直调 LLM 归纳并**落库留存**；「重新生成」才覆盖；另有「交给智能体」按钮把提示词写进输入框 |
 | 周期导航 | 简报**跟随你正在看的那一天**（点 9/25 就出 9/25 那一周），并可用 `‹ ›` 在**有活动的周期之间**前后跳 |
 
-**来源隔离已经就位**：内部键是 `<来源>::<会话>`，条目 id 也含来源，日详情第一层就是来源分区——所以"本机 + 远程服务器（如 `rocs`）分别成卡"是数据结构原生支持的（远程来源的采集通道见文末 Roadmap）。
+**来源隔离**：内部键是 `<来源>::<会话>`，条目 id 也含来源，日详情第一层就是来源分区 —— 所以「本机 + 远程服务器」各自成分区是数据结构原生支持的，二期把采集通道接通了（见文末 Roadmap）。
 
 ## 安装
 
@@ -106,7 +106,12 @@ git clone https://github.com/gychen-NJU/dsh-logwiki.git
 | `heatmap.metric` | `turns` | 默认指标 |
 | `heatmap.includeSubagents` | true | 子代理工作量是否计入热力图 |
 | `ui.language` / `weekStart` | `zh` / `1` | 语言 / 周一起始 |
-| `remote.enable` | false | 远程来源总开关（二期） |
+| `remote.enable` | false | 远程来源总开关：开了之后「更新」会顺带同步所有已启用的远程来源（单独点「同步」不受它限制） |
+| `remote.maxFilesPerSync` | 400 | 单次同步最多拉多少个文件 |
+| `remote.maxBytesPerFile` | 67108864 | 单文件上限（按 base64 **编码后**的体积算，别按原始大小设小） |
+| `remote.maxBytesPerSync` | 33554432 | 单次同步总字节预算 |
+| `remote.commandTimeoutMs` | 120000 | 单条远端命令超时 |
+| `remote.maxSourcesPerRun` | 3 | 一次「更新」最多同步几个来源 |
 
 ## 数据存放
 
@@ -133,7 +138,7 @@ node scripts/verify-remote.mjs        # 远程来源纯逻辑层 60 断言
 node scripts/verify-zstd-frames.mjs   # 多重 zstd frame 解码 8 断言
 ```
 
-当前结果：**只读 38/38（exit=0）**；离线四套件 159/0 · 103/0 · 60/60 · 8/8。
+当前结果：**只读 44/44（exit=0）**；离线四套件 159/0 · 103/0 · 60/60 · 8/8。
 
 > `accept-l1.mjs` 只打 HTTP 端点，**测不到"按钮点了有没有反应"**。点击类交互另见 [`docs/MANUAL-CHECKLIST.md`](docs/MANUAL-CHECKLIST.md) 的 C2 节清单。
 
@@ -173,10 +178,15 @@ dsh-logwiki/
 ## Roadmap
 
 - [x] **一期**（已发布并已通过验收）：本机会话 → 日历 / 热力图 / 三层卡片 / 条目编辑 / 周月简报 / 周期导航
-- [ ] **二期**（进行中）：远程来源
-  - **添加来源**：对话框收 SSH 别名 / WSL 发行版 / 远端 `DSH_HOME` → 生成提示词交给智能体走 **f2a-ssh**（WSL OpenSSH + ControlMaster，2FA 只发生一次）→ 调 `logwiki_import_source` 落库；信息不全时由智能体用 `ask_user_question` 向你索取
-  - **快速通道同步**：`ctx.subprocess` 调 `wsl.exe → ssh`（复用主连接免 2FA）→ 远端 `find` 清单 → 比对账本 → 只拉新增/变化文件（base64）→ 本地用内联 `fzstd` 解码 → 复用同一个 `extract.js`
-  - **来源隔离展示**：日详情第一层就是来源分区（本机 / `rocs` …）
+- [x] **二期**（已完成并已实测跑通真实远端）：远程来源
+  - **添加来源**：工具栏「+ 添加来源」对话框收 SSH 别名 / WSL 发行版 / 远端 `DSH_HOME`；两条登记路径 —— 信息齐了直接登记，或点「交给智能体」生成提示词走 **f2a-ssh**（WSL OpenSSH + ControlMaster，2FA 只发生一次）→ 由智能体调 `logwiki_import_source` 落库；信息不全时**提示词会要求智能体用 `ask_user_question` 向你索取**
+  - **快速通道同步**：点「同步」→ `ctx.subprocess` 调 `wsl.exe → ssh`（复用主连接免 2FA）→ 远端 `find` 清单 → 比对账本**只拉新增/变化** → `base64 -w0` 回传 → 本地用内联 `fzstd` 解码 → 复用同一个 `extract.js`
+  - **来源隔离展示**：日详情第一层就是来源分区（`本机` / `远程 <名称>`），各自带独立的工作区卡片与路径
+
+### 已知行为（不是 bug）
+
+- **有回合数、但那天没有任务卡**：在个别日子里，热力图有颜色、日详情却是空的。原因是那天的活动全部来自**父会话记在另一天的子代理**——按归并契约，子代理并入其顶层父会话、条目只由顶层会话生成，所以落在父会话那一天。属预期行为。
+- **首次回填很慢**：读超大会话日志会占住 Node 事件循环数十秒，期间页面会发顿；且 `scan.maxNewPerRun` 决定每轮处理多少个新增会话，历史是**分批**补齐的。
 
 ## License
 
