@@ -91,8 +91,15 @@ async function main() {
   const health = await req('/health')
   record('/health 可达', health.status === 200 && health.json?.ok === true, `HTTP ${health.status}`)
   const tools = health.json?.tools ?? {}
-  record('工具 logwiki_write_digest 已注册', Array.isArray(tools.registered) && tools.registered.includes('logwiki_write_digest'),
+  // 两个工具都要查：2026-10-01 的故障正是"注册成功但 schema 不合格"——
+  // 只查 registered 会漏，所以同时要求 tools.errors 为空。
+  const TOOL_NAMES = ['logwiki_write_digest', 'logwiki_import_source']
+  const missingTools = TOOL_NAMES.filter((n) => !(Array.isArray(tools.registered) && tools.registered.includes(n)))
+  const toolErrorNames = Object.keys(tools.errors ?? {})
+  record('工具 logwiki_write_digest / logwiki_import_source 都已注册', missingTools.length === 0,
     `registered=[${(tools.registered ?? []).join(',')}] errors=${JSON.stringify(tools.errors ?? {})}`)
+  record('注册无残留错误（tools.errors 为空）', toolErrorNames.length === 0,
+    toolErrorNames.length === 0 ? 'errors={}' : `errors=${JSON.stringify(tools.errors)}`)
   record('store 可写', health.json?.store?.writable === true, JSON.stringify(health.json?.store ?? {}))
   record('sessionQuery 可用', health.json?.services?.sessionQuery === true, `services.sessionQuery=${health.json?.services?.sessionQuery}`)
 

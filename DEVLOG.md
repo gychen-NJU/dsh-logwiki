@@ -576,7 +576,63 @@ totals: 1858 回合 / 81 会话 / 75 条目；活跃日 17 天（2026-09-10 ~ 10
 
 **已知观察**：`2026-09-14 / 09-19 / 09-21 / 09-23` 有回合数但零条目（`sessions` 也是 0）。这些天的活动来自**父会话记在别日的子代理**；按现契约（子代理并入顶层、条目只由顶层会话生成）不产条目 —— 属预期行为而非 bug，但界面上会显得"那天有动静却没任务卡"，值得写进 README 的已知问题。
 
+---
 
+## 工具输入 schema 修复（2026-10-01）
 
+### 改了什么
 
+桌面会话报 `Invalid schema for function 'logwiki_import_source': schema must be a JSON Schema of 'type: "object"', got 'type: null'`。`logwiki_import_source` 与 `logwiki_write_digest` 的 `parameters` 原先是属性简写表；`tools.register` 直接接收定义，发给模型时没有顶层 `type`。旧日志中“输入用 defineTool DSL”的结论只解释了当时为何能注册，不能保证模型请求接受该 schema。
 
+两处输入现在均是完整对象型 JSON Schema：顶层 `type: 'object'`、`properties`、对象层 `required` 数组；简报的 `items[]` 也声明 `required: ['summary']`。工具名称、执行逻辑、输出 schema 均未改。`verify-remote.mjs` 增加模拟 `tools.register` 的回归断言，检查注册后的两份定义经 JSON 序列化仍有顶层 object、必填数组和嵌套必填数组。
+
+### 怎么验的 / 证据
+
+在 `dsh-logwiki` 下执行 `node --check lib/index.js`、`node --check lib/remote-sources.js`、`node --check scripts/verify-remote.mjs` 与 `node scripts/verify-remote.mjs`：语法检查 exit 0，远程来源自检 **61/61 通过**，其中两个工具的注册形状检查通过。`git diff --check` exit 0。
+
+Web 3080 重启后，`/api/dsh-logwiki/health` 返回正常并列出两个工具；Edge 中的 `TEST.sir` 测试工程发起真实标准模式会话，模型成功回复“TEST.sir Web 会话通过。”，不再出现 `Invalid schema` / `INVALID_REQUEST`。任务日历面板正常显示年份、视图、来源筛选与更新入口。Web 启动日志没有三个不兼容 bundle 的跳过警告。浏览器控制台仍有一条 `meow-memory` 的 `settings.section` 槽位异常，本轮会话和 LogWiki 面板未受影响；该问题不在本次修复范围内。
+
+最终 Web 进程（PID 56968）重新启动并自动打开已登录页面后，在同一 `TEST.sir` 会话发送第二轮真实模型消息，收到“最终 Web 3080 复验通过。”；3080 仍由该进程监听，LogWiki 健康接口返回 `ok: true` 且两个工具注册、错误为空。
+
+### 根因补齐 + 防复发（同日第二段）
+
+**根因说全了**：上一段只说"`tools.register` 直接接收定义"，没解释**为什么注册不报错**。读 DSH 0.2.0-rc.2 源码得到确定答案：
+
+- `@deepseek-ai/dsh-tools` 的 `register(definition)` 只做 `assertSupportedJsonSchema(output.schema)`，**完全不碰 `definition.parameters`**；
+- `parameters` 被原样塞进模型请求：`@deepseek-ai/dsh-llm-deepseek` 里 `input_schema: tool.parameters`。
+
+所以坏 schema 的失败点是**每一次模型请求**，而**启动期与注册期毫无迹象**（`/health` 里 `tools.registered` 一切正常）。这也解释了为什么"注册成功"与"每轮对话都报错"能同时成立。修复前的 `parameters` 顶层确实没有 `type`（用 `git show HEAD` 取旧文件实证：`old.type === undefined`）。
+
+**桌面端为什么还在报错**：插件是**进程内加载**的。修复文件写入时间 `21:07:30`，而当时运行的桌面端主进程启动于 `20:34:02` —— 早于修复，所以它内存里仍是旧定义。**必须重启桌面端才会生效**（web 3080 的 PID 56968 启动于 21:31，晚于修复，所以当时 web 已验证通过）。
+
+**防复发改造**（`lib/index.js`）：
+
+1. 新增 `parameterSchemaProblem(parameters)`，在 `registerTools()` 里**注册前自检**：不合格则**跳过注册**、写进 `toolErrors`、`/health` 如实报错，而不是把坏 schema 发给模型（与插件既有的"坏模块如实报 503、绝不打崩 boot"同一策略）。
+2. 新增 `schemaFingerprint()`：`sha256(JSON.stringify(parameters))` 前 16 位，`/health` 以 `tools.inputFingerprints` 暴露。用途是**远程判定"运行中的进程到底持有哪一版定义"**——重启是否真的换了代码，不再依赖界面行为。
+3. `node:crypto` 按本文件既有风格**动态 import 并缓存**，不新增第三方依赖。
+
+**测试**：`verify-remote.mjs` 加三条断言 —— ① **回归锁**：修复前的 DSL 简写形态必须被判为不合格（**这条在修复前必红**，是判别力证明而非恒真式）；② 自检真值表（合格形状通过，缺 `type` / 坏 `properties` / 非数组 `required` / 非对象各自有原因）；③ 生产路径：实际注册的两个工具都过自检且指纹可复算、两工具指纹互不相同。`accept-l1.mjs` 的工具断言从"只查 `logwiki_write_digest`"改成**两个工具都查 + `tools.errors` 必须为空**。
+
+### 桌面端（19387）验收 —— 本轮真正的验收对象
+
+**判别"新旧代码"的标志**：修复前 `/health.tools` 只有 `{registered, errors}`；加了指纹后多出 `inputFingerprints`。重启前后各取一次即可对照。
+
+| # | 步骤 | 证据 |
+|---|---|---|
+| 1 | 重启前桌面端 = 旧代码 | 主进程 PID 40740 启动 `20:34:02` < 修复文件 mtime；`GET 19387/api/dsh-logwiki/health` 返回 `{registered:[两个], errors:{}}` 且**无** `inputFingerprints` |
+| 2 | 重启桌面端并捕获 stdout | `Stop-Process`（7 个进程）→ `Start-Process … -RedirectStandardOutput dev\desktop-19387.out.log`；日志出现 `dsh web: http://127.0.0.1:19387/?token=…`（该 URL 含进程 token，日志已被 `.gitignore` 拦住，绝不入库） |
+| 3 | 端口与端点 | 19387 重新 `Listen`（宿主 PID 34824）；Electron 主窗口在（`MainWindowTitle: 将dsh-logwiki插件安装到桌面端 — DeepSeek Harness`） |
+| 4 | `node scripts/accept-l1.mjs http://127.0.0.1:19387` | **45/45 通过，exit=0**；`工具 logwiki_write_digest / logwiki_import_source 都已注册`、`注册无残留错误` 均 PASS |
+| 5 | 幂等性 | 跑前后 `storages/dsh_logwiki.json` 的 sha256 均为 `1ED41EA0D513684557264AA5686BE569414609C2ACB6722B223B1F5D0D9F1A78`，未变 |
+| 6 | **指纹跨进程比对** | 仓库侧独立复算 `{write_digest: 61bc63c6bddbad73, import_source: fca893300ff4f08c}`，与运行中的桌面端 `/health.tools.inputFingerprints` **逐字相同** |
+| 7 | **真实模型回合（端到端）** | 桌面端 UI 新建会话 → 发「请执行 `echo desktop-acceptance-ok` 并把输出原样告诉我」→ 助手回复含 `desktop-acceptance-ok`，`1 轮 2 步`、用时 9 秒。**该回合至少 2 次模型请求（工具调用 + 收尾）+ 1 次自动标题生成，每次请求都携带完整工具表**，全程无 `Invalid schema` / `type: null` / `INVALID_REQUEST` |
+| 8 | 截图 | `dev/_desktop-19387-real-turn.png`（**只存本地**、已 gitignore：画面含工作区名与会话名，属私有信息，不进公开仓库） |
+
+**回归锁判别力实证**：用 `git show HEAD:dsh-logwiki/lib/index.js` 取回修复前的真实源码，把 `digestTool()` 的旧 `parameters` 喂给 `parameterSchemaProblem()` → 返回 `parameters.type 必须是 'object'（当前 undefined）`；同一函数对新定义返回 `null`。即"旧实现必红"。
+
+`node scripts/verify-remote.mjs` → **64/64 通过**（原 61 项 + 新增 3 项）。
+
+### 桌面端 vs web 端：本次是否重启
+
+- **桌面端 19387**：**有意重启**（旧进程持有修复前的定义，不重启不可能通过验收）。原验收清单 E1 记的红线是"全程未重启/kill 19387"，那是针对 L1/L2 验收期间的**保护性约定**，与本次"修复必须让桌面端加载新代码"是两件事，已在 `docs/MANUAL-CHECKLIST.md` 里更正口径。
+- **web 3080**：**未重启**。它启动于 21:31（晚于 21:07 的修复），已持有修复后的 schema；只是还没有本段的"自检门 + 指纹"两个护栏，属可接受的临时状态，下次重启自然带上。

@@ -183,14 +183,19 @@ export function makeImportSourceTool(deps) {
       '把一个远程 DSH 来源登记进 LogWiki 任务日历，之后它的会话会作为一个独立来源分区出现在日历里。' +
       '用于「添加来源」流程：先用 f2a-ssh 技能确认能连上远端、且远端有 DSH 会话日志，再调用本工具登记。',
     parameters: {
-      label: { type: 'string', required: true, description: '来源的短名称，例如 rocs（会显示在日历的来源分区上）' },
-      sshAlias: { type: 'string', required: true, description: 'WSL ~/.ssh/config 里的主机别名（只允许字母数字点下划线连字符）' },
-      dshHome: { type: 'string', required: true, description: '远端机器上 DSH 主目录的绝对路径，例如 /home/user/.dsh' },
-      wslDistro: { type: 'string', description: 'WSL 发行版名（留空用默认发行版）' },
-      sinceDays: { type: 'number', description: '只同步最近多少天的会话，默认 90' },
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        label: { type: 'string', description: '来源的短名称，例如 rocs（会显示在日历的来源分区上）' },
+        sshAlias: { type: 'string', description: 'WSL ~/.ssh/config 里的主机别名（只允许字母数字点下划线连字符）' },
+        dshHome: { type: 'string', description: '远端机器上 DSH 主目录的绝对路径，例如 /home/user/.dsh' },
+        wslDistro: { type: 'string', description: 'WSL 发行版名（留空用默认发行版）' },
+        sinceDays: { type: 'number', description: '只同步最近多少天的会话，默认 90' },
+      },
+      required: ['label', 'sshAlias', 'dshHome'],
     },
     output: {
-      // output.schema 是真正的 JSON Schema（required 是数组）——与上面 parameters 的 DSL 方言不同
+      // 输入与输出都使用 JSON Schema，required 是对象层级上的数组。
       schema: {
         type: 'object',
         additionalProperties: false,

@@ -18,6 +18,7 @@ import assert from 'node:assert/strict'
 import * as R from '../lib/remote.js'
 import * as RS from '../lib/remote-sources.js'
 import * as EX from '../lib/extract.js'
+import { apply, parameterSchemaProblem, schemaFingerprint } from '../lib/index.js'
 
 const results = []
 const pending = []
@@ -338,13 +339,136 @@ check('提示词提醒"不要反复重试直连"（f2a-ssh 的禁忌）', () => 
 })
 
 console.log('\n--- J. logwiki_import_source 工具 ---')
-check('工具定义形状正确（parameters 用 DSL，output.schema 用 JSON Schema）', () => {
+check('来源工具输入和输出都是对象型 JSON Schema', () => {
   const tool = RS.makeImportSourceTool({ upsertSource: () => {} })
   assert.equal(tool.name, 'logwiki_import_source')
   assert.equal(typeof tool.execute, 'function')
-  assert.equal(tool.parameters.sshAlias.required, true)          // DSL：required 在属性内
-  assert.deepEqual(tool.output.schema.required, ['ok', 'sourceId', 'label', 'sinceDays']) // JSON Schema：数组
+  const input = JSON.parse(JSON.stringify(tool.parameters))
+  assert.equal(input.type, 'object')
+  assert.deepEqual(input.required, ['label', 'sshAlias', 'dshHome'])
+  assert.equal(input.properties.sshAlias.type, 'string')
+  assert.equal(input.properties.sshAlias.required, undefined)
+  assert.deepEqual(tool.output.schema.required, ['ok', 'sourceId', 'label', 'sinceDays'])
   assert.equal(typeof tool.output.render, 'function')
+})
+check('注册给 tools 服务的两个工具均可序列化为对象型输入 JSON Schema', async () => {
+  const registered = []
+  let resolveRegistration
+  const registration = new Promise((resolve) => { resolveRegistration = resolve })
+  const services = {
+    webServer: { register: () => () => {} },
+    tools: { register: (def) => {
+      registered.push(def)
+      if (registered.length === 2) resolveRegistration()
+      return () => {}
+    } },
+  }
+  apply({
+    get: (key) => services[key],
+    effect: (setup) => setup(),
+    inject: () => () => {},
+  })
+  let timeout
+  try {
+    await Promise.race([
+      registration,
+      new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('两个工具未在 2 秒内完成注册')), 2000) }),
+    ])
+  } finally {
+    clearTimeout(timeout)
+  }
+  const tools = new Map(registered.map((def) => [def.name, def]))
+  assert.deepEqual([...tools.keys()], ['logwiki_write_digest', 'logwiki_import_source'])
+  for (const [name, def] of tools) {
+    const input = JSON.parse(JSON.stringify(def.parameters))
+    assert.equal(input.type, 'object', `${name} 缺顶层 object`)
+    assert.equal(Array.isArray(input.required), true, `${name} 缺 required 数组`)
+    assert.equal(typeof input.properties, 'object', `${name} 缺 properties`)
+    assert.equal(input.additionalProperties, false)
+    assert.equal(input.properties.required, undefined)
+  }
+  const digest = tools.get('logwiki_write_digest').parameters
+  assert.deepEqual(digest.required, ['kind', 'period', 'items'])
+  assert.equal(digest.properties.kind.required, undefined)
+  assert.equal(digest.properties.items.items.type, 'object')
+  assert.deepEqual(digest.properties.items.items.required, ['summary'])
+  assert.equal(digest.properties.items.items.properties.summary.required, undefined)
+  assert.deepEqual(tools.get('logwiki_import_source').parameters.required, ['label', 'sshAlias', 'dshHome'])
+})
+// ---------------------------------------------------------------- 回归锁：旧写法必红
+// 2026-10-01 的真实故障：parameters 用 defineTool DSL 的属性简写表（required 写在属性内、
+// 没有顶层 type），tools.register 不校验 parameters，于是每一次模型请求都报
+//   Invalid schema for function '...': schema must be a JSON Schema of 'type: "object"', got 'type: null'
+// 下面这条断言**在修复前必红**——它是本次修复的判别力证明，不是恒真式。
+check('回归锁：修复前的 DSL 简写表必须被判为不合格', () => {
+  const oldShape = {
+    label: { type: 'string', required: true, description: '来源的短名称' },
+    sshAlias: { type: 'string', required: true },
+    dshHome: { type: 'string', required: true },
+    sinceDays: { type: 'number' },
+  }
+  const problem = parameterSchemaProblem(oldShape)
+  assert.equal(typeof problem, 'string')
+  assert.match(problem, /type 必须是 'object'/)
+  // 简报工具修复前的形状同罪
+  const oldDigestShape = {
+    kind: { type: 'string', required: true, enum: ['week', 'month'] },
+    period: { type: 'string', required: true },
+    items: { type: 'array', required: true, items: { type: 'object', properties: {} } },
+  }
+  assert.equal(typeof parameterSchemaProblem(oldDigestShape), 'string')
+})
+check('自检真值表：合格形状通过，各类坏形状各有原因', () => {
+  const ok = { type: 'object', properties: { a: { type: 'string' } }, required: ['a'] }
+  assert.equal(parameterSchemaProblem(ok), null)
+  assert.equal(parameterSchemaProblem({ type: 'object', properties: {} }), null) // required 可省略
+  assert.match(parameterSchemaProblem(null), /必须是对象/)
+  assert.match(parameterSchemaProblem('nope'), /必须是对象/)
+  assert.match(parameterSchemaProblem([]), /必须是对象/)
+  assert.match(parameterSchemaProblem({ properties: {} }), /type 必须是 'object'/)
+  assert.match(parameterSchemaProblem({ type: 'object' }), /properties 必须是对象/)
+  assert.match(parameterSchemaProblem({ type: 'object', properties: [] }), /properties 必须是对象/)
+  assert.match(parameterSchemaProblem({ type: 'object', properties: {}, required: 'a' }), /required 必须是数组/)
+})
+check('生产路径：实际注册的两个工具都过自检，且指纹可复算', async () => {
+  const registered = []
+  let resolveRegistration
+  const registration = new Promise((resolve) => { resolveRegistration = resolve })
+  const services = {
+    webServer: { register: () => () => {} },
+    tools: { register: (def) => {
+      registered.push(def)
+      if (registered.length === 2) resolveRegistration()
+      return () => {}
+    } },
+  }
+  apply({
+    get: (key) => services[key],
+    effect: (setup) => setup(),
+    inject: () => () => {},
+  })
+  let timeout
+  try {
+    await Promise.race([
+      registration,
+      new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('两个工具未在 2 秒内完成注册')), 2000) }),
+    ])
+  } finally {
+    clearTimeout(timeout)
+  }
+  assert.equal(registered.length, 2)
+  for (const def of registered) {
+    assert.equal(parameterSchemaProblem(def.parameters), null, `${def.name} 未过自检`)
+    // 指纹算法固定：sha256(JSON.stringify(parameters)) 前 16 位。验收时用它对
+    // 运行中实例的 /health.tools.inputFingerprints 做逐字比对。
+    const fp = await schemaFingerprint(def.parameters)
+    assert.equal(typeof fp, 'string')
+    assert.equal(fp.length, 16)
+    assert.equal(fp, fp.toLowerCase())
+  }
+  // 指纹必须区分得开两个工具（否则比对无意义）
+  const [a, b] = await Promise.all(registered.map((d) => schemaFingerprint(d.parameters)))
+  assert.notEqual(a, b)
 })
 check('execute 写入归一化后的来源并返回可渲染结果', async () => {
   const saved = []

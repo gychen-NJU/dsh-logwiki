@@ -266,6 +266,67 @@ function workspaceLabelOf(cwd, titles) {
 }
 
 /**
+ * 工具**输入**必须是「对象根 JSON Schema」——这就是本函数存在的全部理由。
+ *
+ * 实测（2026-10-01，dsh 0.2.0-rc.2）：`ctx.get('tools').register(def)` 只校验
+ * `output.schema`（`assertSupportedJsonSchema`），**完全不看 `parameters`**，
+ * 而 `def.parameters` 会被原样塞进模型请求的 `input_schema`
+ * （`dsh-llm-deepseek/lib/index.js` 里的 `input_schema: tool.parameters`）。
+ *
+ * 后果：schema 形状不对时**注册照样成功**（/health 里 tools.registered 一切正常），
+ * 但**每一次模型请求都会失败**：
+ *   Invalid schema for function 'logwiki_import_source':
+ *   schema must be a JSON Schema of 'type: "object"', got 'type: null'
+ * 这类故障在启动时完全不可见，排查代价极高。
+ *
+ * 所以这里在注册前自检：不合格就**少挂一个工具 + 在 /health 里如实报错**，
+ * 而不是把坏 schema 发给模型（与插件"坏掉的模块如实报 503、绝不打崩 boot"同一策略）。
+ *
+ * @param {unknown} parameters - 待注册工具定义里的 parameters
+ * @returns {string|null} 不合格的原因；合格时 null
+ */
+export function parameterSchemaProblem(parameters) {
+  if (parameters === null || typeof parameters !== 'object' || Array.isArray(parameters)) {
+    return `parameters 必须是对象（当前 ${Array.isArray(parameters) ? '数组' : typeof parameters}）`
+  }
+  if (parameters.type !== 'object') {
+    return `parameters.type 必须是 'object'（当前 ${JSON.stringify(parameters.type)}）`
+  }
+  const properties = parameters.properties
+  if (properties === null || typeof properties !== 'object' || Array.isArray(properties)) {
+    return `parameters.properties 必须是对象（当前 ${properties === undefined ? 'missing' : typeof properties}）`
+  }
+  if (parameters.required !== undefined && !Array.isArray(parameters.required)) {
+    return `parameters.required 必须是数组（当前 ${typeof parameters.required}）`
+  }
+  return null
+}
+
+/** `node:crypto` 只在这个函数里被**动态**加载并缓存（插件依赖策略：只用 node: 内置，且不在顶层 import）。 */
+let cryptoModule = null
+
+/**
+ * 输入 schema 指纹：`sha256(JSON.stringify(parameters))` 前 16 位。
+ * 用途：远程比对"**正在运行的那个进程**到底持有哪一版工具定义"——重启有没有真的换上新代码，
+ * 靠 `GET /api/dsh-logwiki/health` 就能判定，不必依赖界面行为。
+ * 取不到 node:crypto 时返回 null（诊断功能降级，不影响注册）。
+ */
+export async function schemaFingerprint(schema) {
+  if (cryptoModule === null) {
+    try {
+      cryptoModule = await import('node:crypto')
+    } catch {
+      return null
+    }
+  }
+  try {
+    return cryptoModule.createHash('sha256').update(JSON.stringify(schema)).digest('hex').slice(0, 16)
+  } catch {
+    return null
+  }
+}
+
+/**
  * 挂载插件。
  * @param ctx - Cordis 上下文（services: webServer；可选 sessionQuery/workspaceRegistry/storage/llm）
  * @param config - cordis.patch.yml（或 --patch 覆盖层）里那一行的 config
@@ -737,6 +798,8 @@ export function apply(ctx, config = {}) {
   // ---------------------------------------------------------------- 工具（「交给智能体」闭环）
   const registeredTools = []
   const toolErrors = {}
+  /** 输入 schema 指纹（工具名 → sha256 前 16 位）；/health 用它证明"运行中的进程持有哪一版定义"。 */
+  const toolFingerprints = {}
 
   /**
    * `logwiki_write_digest` —— 让「交给智能体」那条路能把总结结果直接落库。
@@ -750,27 +813,31 @@ export function apply(ctx, config = {}) {
         '先把 LogWiki 给出的工作条目归纳成 8–12 个**大方向**任务（不要逐条罗列细节），再用本工具落库，' +
         '用户即可在「任务日历」面板里看到并复看。',
       parameters: {
-        kind: { type: 'string', required: true, description: "周期类型：'week' 或 'month'", enum: ['week', 'month'] },
-        period: { type: 'string', required: true, description: '周期标识：week 形如 2026-W40；month 形如 2026-09' },
-        title: { type: 'string', description: '简报标题' },
-        headline: { type: 'string', description: '一句话总览' },
-        items: {
-          type: 'array',
-          required: true,
-          description: '8–12 条大方向任务，每条一句话 + 一个标签；避免上百条细碎条目',
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          kind: { type: 'string', description: "周期类型：'week' 或 'month'", enum: ['week', 'month'] },
+          period: { type: 'string', description: '周期标识：week 形如 2026-W40；month 形如 2026-09' },
+          title: { type: 'string', description: '简报标题' },
+          headline: { type: 'string', description: '一句话总览' },
           items: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              summary: { type: 'string', required: true, description: '一句话总结（建议 ≤60 字）' },
-              tag: { type: 'string', description: '关键词标签（建议 ≤8 字）' },
+            type: 'array',
+            description: '8–12 条大方向任务，每条一句话 + 一个标签；避免上百条细碎条目',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                summary: { type: 'string', description: '一句话总结（建议 ≤60 字）' },
+                tag: { type: 'string', description: '关键词标签（建议 ≤8 字）' },
+              },
+              required: ['summary'],
             },
           },
         },
+        required: ['kind', 'period', 'items'],
       },
       output: {
-        // 注意：output.schema 是**真正的 JSON Schema**（required 是数组），
-        // 与上面 parameters 的 defineTool DSL（required 在属性内）方言不同 —— 实测踩过。
+        // 输入与输出都使用 JSON Schema，required 是对象层级上的数组。
         schema: {
           type: 'object',
           additionalProperties: false,
@@ -841,7 +908,7 @@ export function apply(ctx, config = {}) {
     return source
   }
 
-  function registerTools() {
+  async function registerTools() {
     const tools = ctx.get('tools')
     if (tools === undefined) {
       toolErrors['<tools service>'] = 'tools 服务不可用'
@@ -857,10 +924,20 @@ export function apply(ctx, config = {}) {
       defs.push(mods.remoteSources.makeImportSourceTool({ upsertSource }))
     }
     for (const def of defs) {
+      // 先自检输入 schema —— tools.register 不看 parameters，坏 schema 会一路走到模型请求里
+      // 把**每一轮对话**都打死，而且启动期毫无迹象。宁可少挂一个工具并在此报错。
+      const problem = parameterSchemaProblem(def.parameters)
+      if (problem !== null) {
+        toolErrors[def.name] = `输入 schema 不合格，已跳过注册：${problem}`
+        warn(`[dsh-logwiki] 工具 ${def.name} 未注册：${toolErrors[def.name]}`)
+        continue
+      }
       try {
         const dispose = tools.register(def)
         registeredTools.push(def.name)
         if (typeof dispose === 'function') ctx.effect(() => dispose)
+        const fingerprint = await schemaFingerprint(def.parameters)
+        if (fingerprint !== null) toolFingerprints[def.name] = fingerprint
       } catch (error) {
         toolErrors[def.name] = error instanceof Error ? error.message : String(error)
         warn(`[dsh-logwiki] 工具 ${def.name} 注册失败：${toolErrors[def.name]}`)
@@ -1157,7 +1234,7 @@ export function apply(ctx, config = {}) {
       services: { ...probeServices(ctx), workspaceRegistryInjected: workspaceRegistry !== null },
       modules: Object.keys(mods).reduce((acc, k) => ({ ...acc, [k]: mods[k] !== null }), {}),
       modErrors,
-      tools: { registered: registeredTools, errors: toolErrors },
+      tools: { registered: registeredTools, errors: toolErrors, inputFingerprints: toolFingerprints },
       store: db === null ? { ready: false } : { ready: true, writable: db.writable === true },
     })
   })
@@ -1880,7 +1957,7 @@ export function apply(ctx, config = {}) {
   void (async () => {
     await loadModules()
     await ensureStore()
-    registerTools()
+    await registerTools()
     log(
       `[dsh-logwiki] v${VERSION} 已挂载：${PREFIX}｜模块 ` +
         Object.keys(mods).map((k) => `${k}:${mods[k] === null ? '✗' : '✓'}`).join(' ') +
